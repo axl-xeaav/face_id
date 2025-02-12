@@ -63,10 +63,6 @@ def create_new_member_frame(parent_frame):
     age_value_label = Label(frame, text="", font=("Helvetica", 16),  bg='#068f2b')
     age_value_label.place(x=250, y=start_y + 270)
 
-    fingerprint_label = Label(frame, text="Fingerprint ", font=("Helvetica", 16),  bg='#068f2b')
-    fingerprint_label.place(x=300, y=start_y + 260)
-    fingerprint_checker = Label(frame, text="", bg='#068f2b')
-    fingerprint_checker.place(x=350, y=start_y + 300)
     
     def calculate_age():
         try:
@@ -88,6 +84,8 @@ def create_new_member_frame(parent_frame):
         if any(char.isdigit() for char in name) or not name:
             name_entry.config(bg="red")
             valid = False
+            #name_result = Label(Frame, text="Fill This Up.")
+            #name_result.place(x)
         else:
             name_entry.config(bg="white")
 
@@ -140,3 +138,38 @@ def create_new_member_frame(parent_frame):
     submit_button.place(x=200, y=start_y + 300)
 
     return frame
+
+'''
+from tkinter import *
+root = Tk()
+
+root.title("Backgroound")
+root.geometry("500x500")
+
+def background():
+    for widget in main_frame.winfo_children():
+        widget.destroy()
+    
+def achievement():
+    for widget in main_frame.winfo_children():
+        widget.destroy()
+def contact():
+    for widget in main_frame.winfo_children():
+        widget.destroy()
+
+
+
+
+backg = Button(root, text="Background", command=background)
+backg.place(x=50, y=20)
+achievements = Button(root, text="Achievements", command=achievement)
+achievements.place(x=100, y=60)
+contact = Button(root, text="Contact Info", command=contact)
+contact.place(x=150, y=100)
+
+
+
+
+
+root.mainloop()
+'''
