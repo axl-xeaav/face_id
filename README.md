@@ -1,3 +1,5 @@
+#for thesis project
+
 pip install tkinter, mysql.connector, csv, cv2
 install mysql workbench
   'host': 'localhost',
