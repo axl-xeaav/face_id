@@ -208,7 +208,7 @@ class FaceRecognizer:
                         else:
                             cv2.putText(img, "Verifying...", (x+5, y-5), self.font, 1, (255, 255, 0), 2)
                 else:
-                    cv2.putText(img, "Unknown", (x+5, y-5), self.font, 1, (0, 0, 255), 2)
+                    cv2.putText(img, "Guest", (x+5, y-5), self.font, 1, (0, 0, 255), 2)
                     confirmations = 0
                     
             cv2.putText(img, f"Attendance Today: {attendance_count}", (10, 30), 
