@@ -36,6 +36,27 @@ class AppConfig:
 
 # DATABASE HANDLER
 
+class AppConfig:
+    DB_CONFIG = {
+        'host': 'localhost',
+        'user': 'root',
+        'password': 'mypassword',
+        'database': 'mydb'
+    }
+    COLOR_SCHEME = {
+        'primary': '#4CAF50',
+        'primary_dark': '#45a049',
+        'form_bg': '#068f2b',
+        'main_bg': '#f0f0f0'
+    }
+    FONTS = {
+        'title': ('Verdana', 30, 'bold'),
+        'heading': ('Comic Sans MS', 16, 'bold'),
+        'body': ('Helvetica', 16)
+    }
+
+# DATABASE HANDLER
+
 class Database:
     def __init__(self):
         self.conn = mysql.connector.connect(**AppConfig.DB_CONFIG)
@@ -83,6 +104,22 @@ class Database:
             messagebox.showerror("Database Error", f"Error: {str(e)}")
             return None
 
+    def record_attendance(self, face_id):
+        try:
+            now = datetime.now()
+            date_str = now.strftime('%Y-%m-%d')
+            time_str = now.strftime('%H:%M:%S')
+            self.cursor.execute("""
+                INSERT INTO attendance (face_id, date, time_in)
+                VALUES (%s, %s, %s)
+            """, (face_id, date_str, time_str))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error recording attendance: {str(e)}")
+            self.conn.rollback()
+            return False
+
 # FACE RECOGNITION
 
 class FaceRecognizer:
@@ -90,137 +127,80 @@ class FaceRecognizer:
         self.db = db
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.font = cv2.FONT_HERSHEY_SIMPLEX
-        self.recognizer_trained = True
         self.today_attendance = set()
         self.load_current_date_attendance()
-        
+
     def load_current_date_attendance(self):
         today = datetime.now().strftime('%Y-%m-%d')
         try:
             self.db.cursor.execute("SELECT face_id FROM attendance WHERE date = %s", (today,))
             self.today_attendance = {row[0] for row in self.db.cursor.fetchall()}
         except Exception as e:
-            print(f"Warning: Could not load attendance. Error: {str(e)}")
-            self.today_attendance = set()
-
-    def train_recognizer(self):
-        self.recognizer_trained = True
-        print("DeepFace recognizer ready (no training required)")
+            print(f"Error loading attendance: {e}")
 
     def recognize_faces(self):
-        if not self.recognizer_trained:
-            self.train_recognizer()
         cam = cv2.VideoCapture(0)
         cam.set(3, 640)
         cam.set(4, 480)
-        attendance_count = len(self.today_attendance)
-        min_face_size = 15000
-        required_confirmations = 5
-        confirmations = 0
-        last_face_id = None
-        last_name = None
-        distance_threshold = 0.5  # Increased for less strict matching
         
         try:
             self.db.cursor.execute("SELECT face_id, full_name, face_image FROM members")
             members = self.db.cursor.fetchall()
+            
             if not members:
-                print("Warning: No members found in database.")
-                messagebox.showwarning("Warning", "No registered members found.")
+                messagebox.showwarning("Warning", "No members registered")
                 cam.release()
-                cv2.destroyAllWindows()
                 return 0
-        except Exception as e:
-            print(f"Error fetching members: {str(e)}")
-            messagebox.showerror("Database Error", f"Failed to load members: {str(e)}")
+                
+            while True:
+                ret, img = cam.read()
+                if not ret:
+                    break
+
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                faces = self.face_cascade.detectMultiScale(gray, 1.3, 5)
+
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
+                    
+                    face_img = img[y:y+h, x:x+w]
+                    temp_path = "temp_face.jpg"
+                    cv2.imwrite(temp_path, face_img)
+
+                    for face_id, name, img_path in members:
+                        if not os.path.exists(img_path):
+                            continue
+                            
+                        try:
+                            result = DeepFace.verify(temp_path, img_path, 
+                                                     model_name="ArcFace",
+                                                     enforce_detection=False)
+                            
+                            if result["verified"]:
+                                if face_id not in self.today_attendance:
+                                    if self.db.record_attendance(face_id):
+                                        self.today_attendance.add(face_id)
+                                        cv2.putText(img, f"Attendance Recorded: {name}", 
+                                                   (x, y-10), self.font, 0.9, (0, 255, 0), 2)
+                                        print(f"Recorded attendance for {name}")
+                                else:
+                                    cv2.putText(img, f"Already Recorded: {name}", 
+                                               (x, y-10), self.font, 0.9, (0, 255, 255), 2)
+                                break
+                        except Exception as e:
+                            print(f"Verification error: {e}")
+
+                cv2.imshow('Face Recognition', img)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+
+        finally:
             cam.release()
             cv2.destroyAllWindows()
-            return 0
-
-        while True:
-            ret, img = cam.read()
-            if not ret:
-                print("Error: Could not read frame from camera.")
-                break
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(
-                gray, scaleFactor=1.2, minNeighbors=6, minSize=(120, 120))
-            for (x, y, w, h) in faces:
-                face_area = w * h
-                if face_area < min_face_size:
-                    continue
-                face_img = img[y:y+h, x:x+w]
-                temp_path = "temp_face.jpg"
-                cv2.imwrite(temp_path, face_img)
-                best_face_id, best_distance, best_name = None, float('inf'), None
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
                 
-                for face_id, full_name, img_path in members:
-                    if not os.path.exists(img_path):
-                        print(f"Warning: Image not found at {img_path}")
-                        continue
-                    try:
-                        result = DeepFace.verify(
-                            temp_path,
-                            img_path,
-                            model_name="ArcFace",
-                            detector_backend="opencv",
-                            enforce_detection=False
-                        )
-                        distance = result["distance"]
-                        print(f"Comparing with face_id: {face_id}, Name: {full_name}, Distance: {distance}, Verified: {result['verified']}")
-                        if result["verified"] and distance < best_distance and distance < distance_threshold:
-                            best_face_id, best_distance, best_name = face_id, distance, full_name
-                    except Exception as e:
-                        print(f"Error verifying face for {img_path}: {str(e)}")
-                
-                if best_face_id is not None:
-                    if best_face_id == last_face_id:
-                        confirmations += 1
-                    else:
-                        confirmations = 1
-                        last_face_id = best_face_id
-                        last_name = best_name
-                    if confirmations >= required_confirmations:
-                        display_text = f"{last_name} ({(1-best_distance)*100:.1f}%)"
-                        cv2.putText(img, display_text, (x+5, y-5), self.font, 1, (0, 255, 0), 2)
-                        if best_face_id not in self.today_attendance:
-                            self.record_attendance(best_face_id)
-                            self.today_attendance.add(best_face_id)
-                            attendance_count += 1
-                            print(f"Verified attendance for {last_name} (ID: {best_face_id})")
-                    else:
-                        cv2.putText(img, "Verifying...", (x+5, y-5), self.font, 1, (255, 255, 0), 2)
-                else:
-                    cv2.putText(img, "Guest", (x+5, y-5), self.font, 1, (0, 0, 255), 2)
-                    confirmations = 0
-                cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
-            
-            cv2.putText(img, f"Attendance Today: {attendance_count}", (10, 30), 
-                        self.font, 1, (0, 255, 0), 2)
-            cv2.imshow('Face ID System', img)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-                
-        cam.release()
-        cv2.destroyAllWindows()
-        if os.path.exists("temp_face.jpg"):
-            os.remove("temp_face.jpg")
-        return attendance_count
-        
-    def record_attendance(self, face_id):
-        try:
-            now = datetime.now()
-            date_str = now.strftime('%Y-%m-%d')
-            time_str = now.strftime('%H:%M:%S')
-            self.db.cursor.execute("""
-                INSERT INTO attendance (face_id, date, time_in)
-                VALUES (%s, %s, %s)
-            """, (face_id, date_str, time_str))
-            self.db.conn.commit()
-            print(f"Attendance recorded for ID: {face_id}")
-        except Exception as e:
-            print(f"Error recording attendance: {str(e)}")
-            self.db.conn.rollback()
+        return len(self.today_attendance)
             
 # FACE SCANNER FOR REGISTRATION
 
@@ -432,6 +412,16 @@ class FaceIDSystem:
             tk.Label(root, image=self.bg_image).place(x=5, y=5)
         except FileNotFoundError:
             pass
+    def start_face_recognition(self):
+        if not hasattr(self, 'face_recognizer'):
+            self.face_recognizer = FaceRecognizer(self.db)
+    
+        new_count = self.face_recognizer.recognize_faces()
+        self.attendance_label.config(text=f"Attendance Today: {new_count}")
+        
+        # Update the attendance records view if it's currently open
+        if hasattr(self, 'current_view') and self.current_view == "records":
+            self.show_records()
 
     def setup_ui(self):
         self.sidebar = tk.Frame(
