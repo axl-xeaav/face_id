@@ -14,3 +14,6 @@ do win + r then services.msc search for mysql then run
 
 newInterface.py code without deepface module
 deepface.py try to test in another pc
+
+#add +639 in phone number validate
+#name dont include int
