@@ -8,6 +8,10 @@ import cv2
 import os
 import numpy as np
 import csv
+from deepface import DeepFace
+import logging
+logging.getLogger('tensorflow').disabled = True  # Disable TensorFlow logging
+
 
 # APP CONFIGURATION
 
@@ -84,19 +88,9 @@ class Database:
 class FaceRecognizer:
     def __init__(self, db):
         self.db = db
-        
-        # Initialize face recognizer with fallbacks
-        try:
-            self.recognizer = cv2.face.LBPHFaceRecognizer_create()
-        except AttributeError:
-            try:
-                self.recognizer = cv2.face.createLBPHFaceRecognizer()
-            except AttributeError:
-                self.recognizer = cv2.face_FaceRecognizer.createLBPHFaceRecognizer()
-        
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.font = cv2.FONT_HERSHEY_SIMPLEX
-        self.recognizer_trained = False
+        self.recognizer_trained = True
         self.today_attendance = set()
         self.load_current_date_attendance()
         
@@ -110,116 +104,107 @@ class FaceRecognizer:
             self.today_attendance = set()
 
     def train_recognizer(self):
-        try:
-            self.db.cursor.execute("SELECT face_id, face_image FROM members")
-            faces = self.db.cursor.fetchall()
-            
-            if not faces:
-                messagebox.showwarning("Warning", "No faces in database to train recognizer")
-                return
-                
-            face_samples = []
-            ids = []
-            
-            for face_id, img_path in faces:
-                if os.path.exists(img_path):
-                    pil_img = Image.open(img_path).convert('L')
-                    img_numpy = np.array(pil_img, 'uint8')
-                    face_samples.append(img_numpy)
-                    ids.append(face_id)
-                else:
-                    print(f"Warning: Image not found at {img_path}")
-            
-            if face_samples:
-                self.recognizer.train(face_samples, np.array(ids))
-                self.recognizer_trained = True
-                print(f"Recognizer trained with {len(face_samples)} samples")
-            else:
-                messagebox.showwarning("Warning", "No valid face images found")
-                
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to train recognizer: {str(e)}")
+        self.recognizer_trained = True
+        print("DeepFace recognizer ready (no training required)")
 
     def recognize_faces(self):
         if not self.recognizer_trained:
             self.train_recognizer()
-            if not self.recognizer_trained:
-                return 0
-
         cam = cv2.VideoCapture(0)
         cam.set(3, 640)
         cam.set(4, 480)
-        
         attendance_count = len(self.today_attendance)
-        min_confidence = 60  # Lowered from 70 to be more strict
         min_face_size = 15000
-        required_confirmations = 5  # Require N consistent recognitions
+        required_confirmations = 5
         confirmations = 0
         last_face_id = None
         last_name = None
-
+        distance_threshold = 0.5  # Increased for less strict matching
         
+        try:
+            self.db.cursor.execute("SELECT face_id, full_name, face_image FROM members")
+            members = self.db.cursor.fetchall()
+            if not members:
+                print("Warning: No members found in database.")
+                messagebox.showwarning("Warning", "No registered members found.")
+                cam.release()
+                cv2.destroyAllWindows()
+                return 0
+        except Exception as e:
+            print(f"Error fetching members: {str(e)}")
+            messagebox.showerror("Database Error", f"Failed to load members: {str(e)}")
+            cam.release()
+            cv2.destroyAllWindows()
+            return 0
+
         while True:
             ret, img = cam.read()
             if not ret:
-                print("Error: Could not read frame.")
+                print("Error: Could not read frame from camera.")
                 break
-                
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             faces = self.face_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.2,  # Increased from 1.1
-                minNeighbors=6,   # Increased from 5
-                minSize=(120, 120)) # Increased from 100
-            
+                gray, scaleFactor=1.2, minNeighbors=6, minSize=(120, 120))
             for (x, y, w, h) in faces:
                 face_area = w * h
                 if face_area < min_face_size:
                     continue
-                    
-                cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
-                face_id, confidence = self.recognizer.predict(gray[y:y+h, x:x+w])
+                face_img = img[y:y+h, x:x+w]
+                temp_path = "temp_face.jpg"
+                cv2.imwrite(temp_path, face_img)
+                best_face_id, best_distance, best_name = None, float('inf'), None
                 
-                if confidence < min_confidence:
-                    self.db.cursor.execute("SELECT full_name FROM members WHERE face_id = %s", (face_id,))
-                    result = self.db.cursor.fetchone()
-                    
-                    if result:
-                        current_name = result[0]
-                        
-                        # Verification system
-                        if face_id == last_face_id:
-                            confirmations += 1
-                        else:
-                            confirmations = 1
-                            last_face_id = face_id
-                            last_name = current_name
-                        
-                        # Only show name after multiple confirmations
-                        if confirmations >= required_confirmations:
-                            display_text = f"{last_name} ({100-confidence:.1f}%)" #display confidence level
-                            cv2.putText(img, display_text, (x+5, y-5), self.font, 1, (0, 255, 0), 2)
-                            
-                            if face_id not in self.today_attendance:
-                                self.record_attendance(face_id)
-                                self.today_attendance.add(face_id)
-                                attendance_count += 1
-                                print(f"Verified attendance for {last_name}")
-                        else:
-                            cv2.putText(img, "Verifying...", (x+5, y-5), self.font, 1, (255, 255, 0), 2)
+                for face_id, full_name, img_path in members:
+                    if not os.path.exists(img_path):
+                        print(f"Warning: Image not found at {img_path}")
+                        continue
+                    try:
+                        result = DeepFace.verify(
+                            temp_path,
+                            img_path,
+                            model_name="ArcFace",
+                            detector_backend="opencv",
+                            enforce_detection=False
+                        )
+                        distance = result["distance"]
+                        print(f"Comparing with face_id: {face_id}, Name: {full_name}, Distance: {distance}, Verified: {result['verified']}")
+                        if result["verified"] and distance < best_distance and distance < distance_threshold:
+                            best_face_id, best_distance, best_name = face_id, distance, full_name
+                    except Exception as e:
+                        print(f"Error verifying face for {img_path}: {str(e)}")
+                
+                if best_face_id is not None:
+                    if best_face_id == last_face_id:
+                        confirmations += 1
+                    else:
+                        confirmations = 1
+                        last_face_id = best_face_id
+                        last_name = best_name
+                    if confirmations >= required_confirmations:
+                        display_text = f"{last_name} ({(1-best_distance)*100:.1f}%)"
+                        cv2.putText(img, display_text, (x+5, y-5), self.font, 1, (0, 255, 0), 2)
+                        if best_face_id not in self.today_attendance:
+                            self.record_attendance(best_face_id)
+                            self.today_attendance.add(best_face_id)
+                            attendance_count += 1
+                            print(f"Verified attendance for {last_name} (ID: {best_face_id})")
+                    else:
+                        cv2.putText(img, "Verifying...", (x+5, y-5), self.font, 1, (255, 255, 0), 2)
                 else:
                     cv2.putText(img, "Guest", (x+5, y-5), self.font, 1, (0, 0, 255), 2)
                     confirmations = 0
-                    
-            cv2.putText(img, f"Attendance Today: {attendance_count}", (10, 30), 
-                       self.font, 1, (0, 255, 0), 2)
-            cv2.imshow('Face ID System', img)
+                cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
             
+            cv2.putText(img, f"Attendance Today: {attendance_count}", (10, 30), 
+                        self.font, 1, (0, 255, 0), 2)
+            cv2.imshow('Face ID System', img)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
                 
         cam.release()
         cv2.destroyAllWindows()
+        if os.path.exists("temp_face.jpg"):
+            os.remove("temp_face.jpg")
         return attendance_count
         
     def record_attendance(self, face_id):
@@ -227,7 +212,6 @@ class FaceRecognizer:
             now = datetime.now()
             date_str = now.strftime('%Y-%m-%d')
             time_str = now.strftime('%H:%M:%S')
-            
             self.db.cursor.execute("""
                 INSERT INTO attendance (face_id, date, time_in)
                 VALUES (%s, %s, %s)
@@ -237,61 +221,53 @@ class FaceRecognizer:
         except Exception as e:
             print(f"Error recording attendance: {str(e)}")
             self.db.conn.rollback()
-
+            
 # FACE SCANNER FOR REGISTRATION
 
 def face_scanning(name, preview_callback=None):
     cam = cv2.VideoCapture(0)
     cam.set(3, 640)
     cam.set(4, 480)
-    
     face_detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    
     print(f"\n [INFO] Initializing face capture for {name}. Look at the camera...")
-    
-    img_path = f"dataset/{name}.jpg"
-    
     if not os.path.exists("dataset"):
         os.makedirs("dataset")
-    
+    # Use timestamp to ensure unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    img_path = f"dataset/{name}_{timestamp}.jpg"
     best_face = None
     start_time = datetime.now()
     preview_shown = False
+    min_face_size = 15000
     
     while True:
         ret, img = cam.read()
         if not ret:
+            print("Error: Could not read frame from camera.")
             continue
-            
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_detector.detectMultiScale(gray, 1.3, 5)
-        
+        faces = face_detector.detectMultiScale(gray, 1.3, 6, minSize=(120, 120))
         for (x, y, w, h) in faces:
+            face_area = w * h
+            if face_area < min_face_size:
+                continue
             cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
-            
-            # Wait for 5 seconds before capturing
             if (datetime.now() - start_time).total_seconds() >= 5:
                 best_face = gray[y:y+h, x:x+w]
-                
-                # Show preview 
                 if preview_callback and not preview_shown:
                     color_face = img[y:y+h, x:x+w]
                     color_face = cv2.cvtColor(color_face, cv2.COLOR_BGR2RGB)
                     preview_callback(color_face)
                     preview_shown = True
-                
         cv2.imshow('Register Face', img)
-        
         if best_face is not None or cv2.waitKey(1) & 0xFF == 27:
             break
-            
     if best_face is not None:
         cv2.imwrite(img_path, best_face)
-        print("\n [INFO] Face captured and saved to dataset")
+        print(f"\n [INFO] Face captured and saved to {img_path}")
     else:
         print("\n [INFO] Face capture cancelled")
         img_path = None
-        
     cam.release()
     cv2.destroyAllWindows()
     return img_path
@@ -303,7 +279,8 @@ class RegistrationForm:
         self.frame = tk.Frame(parent, bg=AppConfig.COLOR_SCHEME['form_bg'])
         self.db = db
         self.on_success = on_success_callback
-        self.preview_label = None
+        self.preview_images = []
+        self.current_preview = 0
         self.create_widgets()
     
     def create_widgets(self):
@@ -314,7 +291,6 @@ class RegistrationForm:
             fg="blue", 
             bg=AppConfig.COLOR_SCHEME['form_bg']
         ).pack(pady=25)
-
         self.entries = {}
         fields = [
             ('Name', 'name', 80),
@@ -322,7 +298,6 @@ class RegistrationForm:
             ('Phone Number', 'phone', 155),
             ('Occupation', 'occupation', 240)
         ]
-
         for label, key, y_pos in fields:
             tk.Label(
                 self.frame, 
@@ -330,17 +305,14 @@ class RegistrationForm:
                 font=AppConfig.FONTS['heading'], 
                 bg=AppConfig.COLOR_SCHEME['form_bg']
             ).place(x=25, y=y_pos)
-            
             self.entries[key] = tk.Entry(self.frame, font=AppConfig.FONTS['body'])
             self.entries[key].place(x=250, y=y_pos+10, width=300)
-
         tk.Label(
             self.frame, 
             text="Enter Birthday:", 
             font=AppConfig.FONTS['heading'], 
             bg=AppConfig.COLOR_SCHEME['form_bg']
         ).place(x=25, y=185)
-        
         self.birthday_entry = DateEntry(
             self.frame, 
             width=17, 
@@ -349,14 +321,12 @@ class RegistrationForm:
             font=AppConfig.FONTS['body']
         )
         self.birthday_entry.place(x=250, y=200, width=300)
-
         tk.Label(
             self.frame, 
             text="Age:", 
             font=AppConfig.FONTS['heading'], 
             bg=AppConfig.COLOR_SCHEME['form_bg']
         ).place(x=40, y=280)
-        
         self.age_label = tk.Label(
             self.frame, 
             text="", 
@@ -364,24 +334,18 @@ class RegistrationForm:
             bg=AppConfig.COLOR_SCHEME['form_bg']
         )
         self.age_label.place(x=250, y=290)
-        
         self.birthday_entry.bind("<<DateEntrySelected>>", lambda e: self.calculate_age())
-
-        submit_btn = tk.Button(
-            self.frame,
-            text="Register",
-            font=AppConfig.FONTS['heading'],
-            command=self.validate,
-            bg=AppConfig.COLOR_SCHEME['primary'],
-            fg='white'
-        )
         self.preview_frame = tk.Frame(self.frame, bg='white', width=200, height=200)
         self.preview_frame.place(x=600, y=100)
-        
         self.preview_label = tk.Label(self.preview_frame)
         self.preview_label.pack(fill='both', expand=True)
-        
-        # Modify submit button
+        tk.Button(
+            self.frame,
+            text="Confirm Preview",
+            command=self.confirm_preview,
+            bg=AppConfig.COLOR_SCHEME['primary'],
+            fg='white'
+        ).place(x=600, y=320)
         submit_btn = tk.Button(
             self.frame,
             text="Scan Face & Register",
@@ -391,17 +355,22 @@ class RegistrationForm:
             fg='white'
         )
         submit_btn.place(x=400, y=320)
-        submit_btn.place(x=400, y=320)
         submit_btn.bind("<Enter>", lambda e: e.widget.config(bg=AppConfig.COLOR_SCHEME['primary_dark']))
         submit_btn.bind("<Leave>", lambda e: e.widget.config(bg=AppConfig.COLOR_SCHEME['primary']))
+
     def show_preview(self, img_array):
-        """Show preview of the captured face"""
         img = Image.fromarray(img_array)
         img.thumbnail((200, 200))
         photo = ImageTk.PhotoImage(img)
-        
+        self.preview_images = [photo]  # Store single image
         self.preview_label.config(image=photo)
-        self.preview_label.image = photo  # Keep reference
+        self.preview_label.image = photo
+
+    def confirm_preview(self):
+        if self.preview_images:
+            messagebox.showinfo("Preview", "Preview confirmed. Click 'Scan Face & Register' to proceed.")
+        else:
+            messagebox.showwarning("Preview", "No face image captured yet.")
 
     def calculate_age(self):
         try:
@@ -417,12 +386,10 @@ class RegistrationForm:
         valid = True
         name = self.entries['name'].get().strip()
         phone = self.entries['phone'].get().strip()
-        
         if not name or any(char.isdigit() for char in name):
             self.entries['name'].config(bg="red")
             valid = False
-        
-        if not phone.isdigit() or len(phone) != 11:
+        if not (phone.isdigit() and len(phone) == 11 and phone.startswith("09")):
             self.entries['phone'].config(bg="red")
             valid = False
 
@@ -431,27 +398,23 @@ class RegistrationForm:
 
     def register_member(self):
         name = self.entries['name'].get().strip()
-        
-        # First show preview, then confirm
         img_path = face_scanning(name.replace(" ", "_"), preview_callback=self.show_preview)
-        
-        if img_path:
-            if messagebox.askyesno("Confirm", "Save this face image?"):
-                member_data = (
-                    name,
-                    self.entries['address'].get().strip(),
-                    self.entries['phone'].get().strip(),
-                    self.birthday_entry.get(),
-                    self.entries['occupation'].get().strip(),
-                    self.age_label.cget("text"),
-                    img_path
-                )
-                
-                if self.db.register_member(member_data):
-                    messagebox.showinfo("Success", "Member registered successfully!")
-                    self.on_success()
+        if img_path and messagebox.askyesno("Confirm", "Save this face image?"):
+            member_data = (
+                name,
+                self.entries['address'].get().strip(),
+                self.entries['phone'].get().strip(),
+                self.birthday_entry.get(),
+                self.entries['occupation'].get().strip(),
+                self.age_label.cget("text"),
+                img_path
+            )
+            if self.db.register_member(member_data):
+                messagebox.showinfo("Success", "Member registered successfully!")
+                self.on_success()
+                self.preview_images = []
+                self.preview_label.config(image='')
             else:
-                # Delete the captured image if user cancels
                 if os.path.exists(img_path):
                     os.remove(img_path)
 # MAIN APPLICATION
