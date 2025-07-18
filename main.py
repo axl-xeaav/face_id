@@ -46,6 +46,7 @@ class Database:
     
     def create_tables(self):
         try:
+            # Create members table with all required columns
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS members (
                     face_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -56,10 +57,13 @@ class Database:
                     contact_number VARCHAR(11),
                     bday DATE,
                     age INT,
+                    sex CHAR(1),
                     face_image VARCHAR(255), 
+                    is_deceased BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS attendance (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -69,6 +73,7 @@ class Database:
                     FOREIGN KEY (face_id) REFERENCES members(face_id)
                 )
             """)
+            
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS admin_users (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -78,9 +83,10 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Check if admin user exists
             self.cursor.execute("SELECT COUNT(*) FROM admin_users")
             if self.cursor.fetchone()[0] == 0:
-                from hashlib import sha256
                 default_password = "mypassword"
                 password_hash = sha256(default_password.encode()).hexdigest()
                 
@@ -89,16 +95,67 @@ class Database:
                     (username, password_hash, security_question_answer)
                     VALUES (%s, %s, %s)
                 """, ("admin", password_hash, "dog"))
+            
+            # Ensure all columns exist (including any that might be missing)
+            self._ensure_columns_exist()
+            
+            self.conn.commit()
+            
+        except Exception as e:
+            self.conn.rollback()
+            messagebox.showerror("Database Error", f"Error creating tables: {str(e)}")
+
+    def _ensure_columns_exist(self):
+        """Ensure all required columns exist in the members table"""
+        try:
+            # List of columns to check/add
+            columns = [
+                ('sex', "CHAR(1)"),
+                ('is_deceased', "BOOLEAN DEFAULT FALSE")
+            ]
+            
+            for column_name, column_def in columns:
+                self.cursor.execute(f"""
+                    SELECT COUNT(*) FROM information_schema.columns 
+                    WHERE table_name = 'members' AND column_name = '{column_name}'
+                """)
+                if self.cursor.fetchone()[0] == 0:
+                    self.cursor.execute(f"ALTER TABLE members ADD COLUMN {column_name} {column_def}")
+                    print(f"Added missing column: {column_name}")
+            
             self.conn.commit()
         except Exception as e:
-            messagebox.showerror("Database Error", f"Error creating tables: {str(e)}")
+            self.conn.rollback()
+            print(f"Error ensuring columns exist: {str(e)}")
+
+    def _ensure_columns_exist(self):
+        """Ensure all required columns exist in the database"""
+        columns_to_check = [
+            ('sex', "CHAR(1)"),
+            ('is_deceased', "BOOLEAN DEFAULT FALSE")
+        ]
+        
+        for column_name, column_def in columns_to_check:
+            self.cursor.execute(f"""
+                SELECT COUNT(*) FROM information_schema.columns 
+                WHERE table_name = 'members' AND column_name = '{column_name}'
+            """)
+            if self.cursor.fetchone()[0] == 0:
+                try:
+                    self.cursor.execute(f"ALTER TABLE members ADD COLUMN {column_name} {column_def}")
+                    self.conn.commit()
+                    print(f"Added missing column: {column_name}")
+                except Exception as e:
+                    print(f"Error adding column {column_name}: {str(e)}")
+                    self.conn.rollback()
 
     def register_member(self, member_data):
         try:
             query = """
                 INSERT INTO members 
-                (first_name, middle_initial, last_name, address, contact_number, bday, age, face_image) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (first_name, middle_initial, last_name, address, contact_number, 
+                bday, age, sex, face_image) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             self.cursor.execute(query, member_data)
             member_id = self.cursor.lastrowid
@@ -479,6 +536,12 @@ class RegistrationForm:
         
         self.entries = {}
         
+        # Preview frame
+        self.preview_frame = tk.Frame(self.frame, bg='white', width=200, height=200)
+        self.preview_frame.place(x=600, y=100)
+        self.preview_label = tk.Label(self.preview_frame)
+        self.preview_label.pack(fill='both', expand=True)
+        
         # Name fields
         self._create_label_entry("First Name:", 'first_name', 80, width=300)
         self._create_label_entry("Middle Initial:", 'middle_initial', 130, width=50)
@@ -527,14 +590,37 @@ class RegistrationForm:
             bg=AppConfig.COLOR_SCHEME['form_bg']
         )
         self.age_label.place(x=250, y=390)
+
+        tk.Label(
+            self.frame, 
+            text="Sex:", 
+            font=AppConfig.FONTS['heading'], 
+            bg=AppConfig.COLOR_SCHEME['form_bg']
+        ).place(x=25, y=430)
+
+        self.sex_var = tk.StringVar()
+        sex_frame = tk.Frame(self.frame, bg=AppConfig.COLOR_SCHEME['form_bg'])
+        sex_frame.place(x=250, y=440)
         
-        # Preview frame
-        self.preview_frame = tk.Frame(self.frame, bg='white', width=200, height=200)
-        self.preview_frame.place(x=600, y=100)
-        self.preview_label = tk.Label(self.preview_frame)
-        self.preview_label.pack(fill='both', expand=True)
+        tk.Radiobutton(
+            sex_frame,
+            text="Male",
+            variable=self.sex_var,
+            value='M',
+            font=AppConfig.FONTS['body'],
+            bg=AppConfig.COLOR_SCHEME['form_bg']
+        ).pack(side='left')
         
-        # Submit button
+        tk.Radiobutton(
+            sex_frame,
+            text="Female",
+            variable=self.sex_var,
+            value='F',
+            font=AppConfig.FONTS['body'],
+            bg=AppConfig.COLOR_SCHEME['form_bg']
+        ).pack(side='left')
+        
+        # Submit button - Now properly defined before being placed
         submit_btn = tk.Button(
             self.frame,
             text="Scan Face & Register",
@@ -543,10 +629,9 @@ class RegistrationForm:
             bg=AppConfig.COLOR_SCHEME['primary'],
             fg='white'
         )
-        submit_btn.place(x=400, y=420)
+        submit_btn.place(x=400, y=480)
         submit_btn.bind("<Enter>", lambda e: e.widget.config(bg=AppConfig.COLOR_SCHEME['primary_dark']))
         submit_btn.bind("<Leave>", lambda e: e.widget.config(bg=AppConfig.COLOR_SCHEME['primary']))
-
     def _create_label_entry(self, label_text, field_name, y_pos, width):
         """Helper method to create consistent label+entry pairs"""
         tk.Label(
@@ -719,6 +804,7 @@ class RegistrationForm:
                     self.entries['phone'].get().strip(),
                     self.birthday_entry.get(),
                     self.age_label.cget("text"),
+                    self.sex_var.get(),  # Include sex
                     img_path
                 )
                 
@@ -1193,8 +1279,8 @@ class FaceIDSystem:
 
         self.members_tree = ttk.Treeview(
             tree_frame,
-            columns=("ID", "First Name", "Middle Name", "Last Name", "Address", 
-                    "Contact Number", "Birthday", "Age", "Actions"),
+            columns=("ID", "First Name", "Middle Name", "Last Name", "Sex", "Address", 
+                    "Contact Number", "Birthday", "Age", "Status", "Actions"),
             show="headings",
             height=20
         )
@@ -1205,10 +1291,12 @@ class FaceIDSystem:
             ("First Name", 120, 'w'),
             ("Middle Name", 80, 'w'),
             ("Last Name", 120, 'w'),
+            ("Sex", 50, 'center'),
             ("Address", 180, 'w'),
             ("Contact Number", 120, 'center'),
             ("Birthday", 100, 'center'),
             ("Age", 50, 'center'),
+            ("Status", 80, 'center'),
             ("Actions", 80, 'center')
         ]
 
@@ -1253,8 +1341,8 @@ class FaceIDSystem:
             search_term = self.search_var.get().lower() if hasattr(self, 'search_var') else ""
             
             self.db.cursor.execute("""
-                SELECT face_id, first_name, middle_initial, last_name, address, 
-                    contact_number, DATE_FORMAT(bday, '%Y-%m-%d'), age, face_image
+                SELECT face_id, first_name, middle_initial, last_name, sex, address, 
+                    contact_number, DATE_FORMAT(bday, '%Y-%m-%d'), age, is_deceased
                 FROM members
                 ORDER BY last_name, first_name
             """)
@@ -1264,7 +1352,11 @@ class FaceIDSystem:
                 # Check if member matches search term
                 member_text = " ".join(str(x) for x in member).lower()
                 if not search_term or search_term in member_text:
-                    self.members_tree.insert("", tk.END, values=(*member[:-1], "Edit"))
+                    status = "Deceased" if member[9] else "Active"
+                    self.members_tree.insert("", tk.END, 
+                                        values=(member[0], member[1], member[2], member[3],
+                                                member[4], member[5], member[6], member[7],
+                                                member[8], status, "Edit"))
                     
         except Exception as e:
             messagebox.showerror("Database Error", f"Failed to load members: {str(e)}")
@@ -1363,6 +1455,48 @@ class FaceIDSystem:
         
         # Action buttons
         self._setup_action_buttons(edit_window)
+        self.is_deceased_var = tk.BooleanVar(value=member_data[9] if len(member_data) > 9 else False)
+    
+        # Add Sex/Gender selection (radio buttons)
+        tk.Label(form_frame, text="Sex:", font=('Arial', 12)).grid(
+            row=8, column=0, padx=5, pady=5, sticky='e')
+        
+        self.sex_var = tk.StringVar(value=member_data[8] if len(member_data) > 8 else '')
+        
+        sex_frame = tk.Frame(form_frame)
+        sex_frame.grid(row=8, column=1, sticky='w')
+        
+        tk.Radiobutton(
+            sex_frame,
+            text="Male",
+            variable=self.sex_var,
+            value='M',
+            font=('Arial', 12)
+        ).pack(side='left')
+        
+        tk.Radiobutton(
+            sex_frame,
+            text="Female",
+            variable=self.sex_var,
+            value='F',
+            font=('Arial', 12)
+        ).pack(side='left')
+        
+        # Position deceased checkbox after sex
+        self.is_deceased_var = tk.BooleanVar(value=member_data[9] if len(member_data) > 9 else False)
+        tk.Label(form_frame, text="Deceased:", font=('Arial', 12)).grid(
+            row=9, column=0, padx=5, pady=5, sticky='e')
+        #deceased
+        tk.Label(form_frame, text="Deceased:", font=('Arial', 12)).grid(
+            row=7, column=0, padx=5, pady=5, sticky='e')
+        
+        deceased_cb = tk.Checkbutton(
+            form_frame,
+            variable=self.is_deceased_var,
+            onvalue=True,
+            offvalue=False
+        )
+        deceased_cb.grid(row=7, column=1, padx=5, pady=5, sticky='w')
 
     def _handle_birthday_change(self, date_entry):
         """Update age when birthday changes"""
@@ -1481,6 +1615,8 @@ class FaceIDSystem:
                 self.edit_entries['contact_number'].get(),
                 self.edit_entries['bday'].get(),
                 self.edit_entries['age'].get(),
+                self.sex_var.get(),  # NEW: Sex value
+                self.is_deceased_var.get(),
                 self.current_image_path,
                 self.current_edit_member[0]  # face_id
             )
@@ -1489,7 +1625,7 @@ class FaceIDSystem:
                 UPDATE members 
                 SET first_name=%s, middle_initial=%s, last_name=%s, 
                     address=%s, contact_number=%s, bday=%s, 
-                    age=%s, face_image=%s
+                    age=%s, sex=%s, is_deceased=%s, face_image=%s
                 WHERE face_id=%s
             """, updated_data)
             
@@ -1668,7 +1804,7 @@ class FaceIDSystem:
         close_btn.pack(pady=10)
 
     def _load_attendance_records(self):
-        """Load members with their attendance status based on Saturday attendance"""
+        """Load members with their attendance status based on Saturday attendance and deceased status"""
         # Clear existing data
         for item in self.records_tree.get_children():
             self.records_tree.delete(item)
@@ -1685,14 +1821,14 @@ class FaceIDSystem:
             if has_created_at:
                 self.db.cursor.execute("""
                     SELECT face_id, CONCAT(first_name, ' ', last_name) as name, 
-                        DATE(created_at) as reg_date
+                        is_deceased, DATE(created_at) as reg_date
                     FROM members
                     ORDER BY last_name, first_name
                 """)
             else:
                 self.db.cursor.execute("""
                     SELECT face_id, CONCAT(first_name, ' ', last_name) as name, 
-                        NULL as reg_date
+                        is_deceased, NULL as reg_date
                     FROM members
                     ORDER BY last_name, first_name
                 """)
@@ -1706,8 +1842,14 @@ class FaceIDSystem:
             """)
             saturdays = [row[0] for row in self.db.cursor.fetchall()]
             
-            # Get each member's Saturday attendance
-            for member_id, name, reg_date in members:
+            # Process each member
+            for member_id, name, is_deceased, reg_date in members:
+                # Check deceased status first
+                if is_deceased:
+                    status = "Deceased"
+                    self.records_tree.insert("", tk.END, values=(name, status), tags=(member_id,))
+                    continue
+                
                 # Check if registration was on Saturday (if we have the date)
                 reg_is_saturday = False
                 if reg_date and datetime.strptime(str(reg_date), '%Y-%m-%d').weekday() == 5:
@@ -1736,11 +1878,11 @@ class FaceIDSystem:
                     
                     # Check if member attended any of the recent 2 Saturdays
                     attended_recent = any(sat in member_saturdays for sat in recent_saturdays)
-                    status = "Active" if attended_recent else "Inactive (Missed 2 Saturdays)"
+                    status = "Active" if attended_recent else "Inactive"
                 
                 # Store member_id in the item but don't display it
                 self.records_tree.insert("", tk.END, values=(name, status), tags=(member_id,))
-
+                
         except Exception as e:
             messagebox.showerror("Database Error", f"Failed to load records: {str(e)}")
             print(traceback.format_exc())
