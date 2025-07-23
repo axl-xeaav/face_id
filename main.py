@@ -6,15 +6,15 @@ from datetime import datetime
 import mysql.connector
 import cv2
 import os
-import numpy as np
-import csv
 from deepface import DeepFace
 import logging
 import traceback
 from hashlib import sha256
 from tkinter import simpledialog
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 
 logging.getLogger('tensorflow').disabled = True  # Disable TensorFlow logging
+
 # APP CONFIGURATION
 
 class AppConfig:
@@ -159,17 +159,7 @@ class Database:
             """
             self.cursor.execute(query, member_data)
             member_id = self.cursor.lastrowid
-            
-            # Automatically log a Saturday attendance for new members registered on Saturday
-            today = datetime.now().date()
-            if today.weekday() == 5:  # 5 = Saturday
-                time_in = datetime.now().strftime('%H:%M:%S')
-                self.cursor.execute("""
-                    INSERT INTO attendance (face_id, date, time_in)
-                    VALUES (%s, %s, %s)
-                """, (member_id, today, time_in))
-            
-            self.conn.commit()
+            self.conn.commit()  # No automatic Sunday attendance
             return member_id
         except Exception as e:
             messagebox.showerror("Database Error", f"Error: {str(e)}")
@@ -451,12 +441,12 @@ class FaceRecognizer:
             now = datetime.now()
             date_str = now.strftime('%Y-%m-%d')
             time_str = now.strftime('%H:%M:%S')
+            
             self.db.cursor.execute("""
                 INSERT INTO attendance (face_id, date, time_in)
                 VALUES (%s, %s, %s)
             """, (face_id, date_str, time_str))
             self.db.conn.commit()
-            print(f"Attendance recorded for ID: {face_id}")
         except Exception as e:
             print(f"Error recording attendance: {str(e)}")
             self.db.conn.rollback()
@@ -815,7 +805,8 @@ class RegistrationForm:
                     self.on_success()
                     
                     # Update attendance count if registered on Saturday
-                    if datetime.now().weekday() == 5:  # 5 = Saturday
+                    # Update attendance count if registered on Sunday
+                    if datetime.now().weekday() == 6:  # 6 = Sunday (changed from 5=Saturday)
                         if hasattr(self.master.master, 'attendance_label'):
                             today = datetime.now().strftime('%Y-%m-%d')
                             try:
@@ -1370,13 +1361,14 @@ class FaceIDSystem:
         region = self.members_tree.identify("region", event.x, event.y)
         if region == "cell":
             column = self.members_tree.identify_column(event.x)
-            if column == "#9":  # Actions column
+            # Columns are 1-indexed, and "Actions" is the 11th column (index 10)
+            if column == "#11":  # Changed from #9 to #11 since we have 11 columns
                 item = self.members_tree.identify_row(event.y)
                 member_id = self.members_tree.item(item)['values'][0]
                 
                 self.db.cursor.execute("""
-                    SELECT face_id, first_name, middle_initial, last_name, address, 
-                        contact_number, bday, age, face_image
+                    SELECT face_id, first_name, middle_initial, last_name, sex, address, 
+                        contact_number, bday, age, is_deceased, face_image
                     FROM members
                     WHERE face_id = %s
                 """, (member_id,))
@@ -1387,7 +1379,7 @@ class FaceIDSystem:
 
 
     def show_edit_form(self, member_data):
-        """Show form to edit member information with proper syntax and working age updates"""
+        """Show form to edit member information"""
         edit_window = tk.Toplevel(self.root)
         edit_window.title("Edit Member")
         edit_window.geometry("800x600")
@@ -1403,15 +1395,15 @@ class FaceIDSystem:
         form_frame = tk.Frame(edit_window)
         form_frame.pack(pady=10)
         
-        # Field configuration
+        # Field configuration - now explicitly using the correct indices from member_data
         fields = [
-            ("First Name:", "first_name", 0, member_data[1], "entry"),
-            ("Middle Initial:", "middle_initial", 1, member_data[2], "entry"),
-            ("Last Name:", "last_name", 2, member_data[3], "entry"),
-            ("Address:", "address", 3, member_data[4], "entry"),
-            ("Contact Number:", "contact_number", 4, member_data[5], "entry"),
-            ("Birthday:", "bday", 5, member_data[6], "date"),
-            ("Age:", "age", 6, member_data[7], "entry")
+            ("First Name:", "first_name", 0, member_data[1], "entry"),        # index 1
+            ("Middle Initial:", "middle_initial", 1, member_data[2], "entry"), # index 2
+            ("Last Name:", "last_name", 2, member_data[3], "entry"),          # index 3
+            ("Address:", "address", 3, member_data[5], "entry"),              # index 5 (address)
+            ("Contact Number:", "contact_number", 4, member_data[6], "entry"), # index 6 (phone)
+            ("Birthday:", "bday", 5, member_data[7], "date"),                 # index 7 (birthday)
+            ("Age:", "age", 6, member_data[8], "entry")                       # index 8 (age)
         ]
         
         self.edit_entries = {}
@@ -1432,9 +1424,14 @@ class FaceIDSystem:
                     date_pattern='y-mm-dd',
                     font=('Arial', 12))
                 if value:
-                    entry.set_date(datetime.strptime(str(value), '%Y-%m-%d'))
+                    try:
+                        entry.set_date(datetime.strptime(str(value), '%Y-%m-%d'))
+                    except ValueError:
+                        # Handle invalid date format
+                        entry.set_date(datetime.today())
+                        print(f"Warning: Invalid date format for {value}")
                 
-                # Bind date change event with proper closure
+                # Bind date change event
                 def on_date_change(event, e=entry):
                     self._handle_birthday_change(e)
                 entry.bind("<<DateEntrySelected>>", on_date_change)
@@ -1453,15 +1450,10 @@ class FaceIDSystem:
         # Face image preview
         self._setup_face_preview(edit_window, member_data)
         
-        # Action buttons
-        self._setup_action_buttons(edit_window)
-        self.is_deceased_var = tk.BooleanVar(value=member_data[9] if len(member_data) > 9 else False)
-    
-        # Add Sex/Gender selection (radio buttons)
+        # Sex/Gender selection
+        self.sex_var = tk.StringVar(value=member_data[4] if len(member_data) > 4 else 'M')  # index 4 (sex)
         tk.Label(form_frame, text="Sex:", font=('Arial', 12)).grid(
             row=8, column=0, padx=5, pady=5, sticky='e')
-        
-        self.sex_var = tk.StringVar(value=member_data[8] if len(member_data) > 8 else '')
         
         sex_frame = tk.Frame(form_frame)
         sex_frame.grid(row=8, column=1, sticky='w')
@@ -1482,21 +1474,20 @@ class FaceIDSystem:
             font=('Arial', 12)
         ).pack(side='left')
         
-        # Position deceased checkbox after sex
-        self.is_deceased_var = tk.BooleanVar(value=member_data[9] if len(member_data) > 9 else False)
+        # Deceased checkbox
+        self.is_deceased_var = tk.BooleanVar(value=member_data[9] if len(member_data) > 9 else False)  # index 9 (is_deceased)
         tk.Label(form_frame, text="Deceased:", font=('Arial', 12)).grid(
             row=9, column=0, padx=5, pady=5, sticky='e')
-        #deceased
-        tk.Label(form_frame, text="Deceased:", font=('Arial', 12)).grid(
-            row=7, column=0, padx=5, pady=5, sticky='e')
         
-        deceased_cb = tk.Checkbutton(
+        tk.Checkbutton(
             form_frame,
             variable=self.is_deceased_var,
             onvalue=True,
             offvalue=False
-        )
-        deceased_cb.grid(row=7, column=1, padx=5, pady=5, sticky='w')
+        ).grid(row=9, column=1, padx=5, pady=5, sticky='w')
+
+        # Action buttons - THIS SHOULD BE CALLED ONLY ONCE AND AFTER ALL OTHER ELEMENTS
+        self._setup_action_buttons(edit_window)
 
     def _handle_birthday_change(self, date_entry):
         """Update age when birthday changes"""
@@ -1517,56 +1508,109 @@ class FaceIDSystem:
             self.edit_entries['bday'].config(background='#ffdddd', foreground='red')
 
     def _setup_face_preview(self, parent_window, member_data):
-        """Setup face image preview section"""
+        """Setup face image preview section with proper error handling"""
         self.preview_frame = tk.Frame(parent_window, bg='white', width=200, height=200)
         self.preview_frame.pack(pady=10)
         
         self.preview_label = tk.Label(self.preview_frame)
         self.preview_label.pack(fill='both', expand=True)
         
-        # Load current face image
-        self.current_image_path = member_data[8] if len(member_data) > 8 else None
-        if self.current_image_path and os.path.exists(self.current_image_path):
+        # Get image path (index 10 is face_image in our query)
+        self.current_image_path = member_data[10] if len(member_data) > 10 else None
+        
+        # Try multiple locations if image not found
+        possible_paths = [
+            self.current_image_path,
+            os.path.join("dataset", os.path.basename(self.current_image_path)) if self.current_image_path else None,
+            os.path.join(os.path.dirname(__file__), "dataset", os.path.basename(self.current_image_path)) if self.current_image_path else None
+        ]
+        
+        img_found = False
+        for path in possible_paths:
+            if path and os.path.exists(path):
+                try:
+                    img = Image.open(path)
+                    img.thumbnail((200, 200))
+                    photo = ImageTk.PhotoImage(img)
+                    self.preview_label.config(image=photo)
+                    self.preview_label.image = photo  # Keep reference
+                    self.current_image_path = path  # Update to found path
+                    img_found = True
+                    break
+                except Exception as e:
+                    print(f"Error loading image {path}: {str(e)}")
+                    continue
+        
+        if not img_found:
+            # Create a placeholder with member initials
+            first_name = member_data[1] if len(member_data) > 1 else ""
+            last_name = member_data[3] if len(member_data) > 3 else ""
+            initials = f"{first_name[0] if first_name else ''}{last_name[0] if last_name else ''}"
+            
+            # Create blank image with initials
+            img = Image.new('RGB', (200, 200), color=(200, 200, 200))
+            draw = ImageDraw.Draw(img)
             try:
-                img = Image.open(self.current_image_path)
-                img.thumbnail((200, 200))
-                photo = ImageTk.PhotoImage(img)
-                self.preview_label.config(image=photo)
-                self.preview_label.image = photo
-            except Exception as e:
-                print(f"Error loading image: {str(e)}")
-                tk.Label(self.preview_frame, text="Image not available", font=('Arial', 12)).pack()
-        else:
-            tk.Label(self.preview_frame, text="No image available", font=('Arial', 12)).pack()
+                font = ImageFont.truetype("arial.ttf", 48)
+            except:
+                font = ImageFont.load_default()
+            
+            w, h = draw.textsize(initials, font=font)
+            draw.text(((200-w)/2, (200-h)/2), initials, fill="black", font=font)
+            
+            photo = ImageTk.PhotoImage(img)
+            self.preview_label.config(image=photo)
+            self.preview_label.image = photo
+            tk.Label(self.preview_frame, 
+                    text="Image not found\nShowing initials", 
+                    font=('Arial', 8),
+                    bg='white').pack()
 
     def _setup_action_buttons(self, parent_window):
-        """Setup action buttons with proper commands"""
+        """Setup action buttons with proper commands and styling"""
         btn_frame = tk.Frame(parent_window)
         btn_frame.pack(pady=10)
         
-        # Update Face Image button
-        tk.Button(
+        # Update Face Image Button
+        update_img_btn = tk.Button(
             btn_frame,
             text="Update Face Image",
             command=self._update_face_image,
             bg='#4CAF50',
-            fg='white').pack(side='left', padx=5)
+            fg='white',
+            font=('Arial', 12),
+            width=15
+        )
+        update_img_btn.pack(side='left', padx=5)
         
-        # Save Changes button
-        tk.Button(
+        # Save Changes Button
+        save_btn = tk.Button(
             btn_frame,
             text="Save Changes",
             command=self._save_member_changes,
             bg='#4CAF50',
-            fg='white').pack(side='left', padx=5)
+            fg='white',
+            font=('Arial', 12),
+            width=15
+        )
+        save_btn.pack(side='left', padx=5)
         
-        # Cancel button
-        tk.Button(
+        # Cancel Button
+        cancel_btn = tk.Button(
             btn_frame,
             text="Cancel",
             command=parent_window.destroy,
             bg='#f44336',
-            fg='white').pack(side='left', padx=5)
+            fg='white',
+            font=('Arial', 12),
+            width=15
+        )
+        cancel_btn.pack(side='left', padx=5)
+        
+        # Add hover effects
+        for btn in [update_img_btn, save_btn, cancel_btn]:
+            btn.bind("<Enter>", lambda e: e.widget.config(bg='#45a049' if e.widget['text'] != 'Cancel' else '#d32f2f'))
+            btn.bind("<Leave>", lambda e: e.widget.config(bg='#4CAF50' if e.widget['text'] != 'Cancel' else '#f44336'))
 
     def _update_face_image(self):
         """Handle face image updates"""
@@ -1733,7 +1777,7 @@ class FaceIDSystem:
         refresh_btn.pack(pady=10)
         
     def _show_member_attendance(self, event):
-        """Show attendance logs for selected member in new window"""
+        """Show ALL attendance dates for selected member (not just Sundays)"""
         selected = self.records_tree.selection()
         if not selected:
             return
@@ -1744,30 +1788,33 @@ class FaceIDSystem:
         
         # Create new window
         log_window = tk.Toplevel(self.root)
-        log_window.title(f"Attendance Logs - {member_name}")
+        log_window.title(f"Full Attendance History - {member_name}")
         log_window.geometry("600x400")
         
         # Title
         tk.Label(
             log_window,
-            text=f"Attendance History for {member_name}",
+            text=f"All Attendance Records for {member_name}",
             font=('Arial', 14, 'bold')
         ).pack(pady=10)
         
-        # Create treeview with scrollbars
+        # Treeview with scrollbars
         tree_frame = tk.Frame(log_window)
         tree_frame.pack(fill='both', expand=True, padx=10, pady=10)
 
         log_tree = ttk.Treeview(
             tree_frame,
-            columns=("Date"),
+            columns=("Date", "Time In"),
             show="headings",
             height=15
         )
-
+        
         # Configure columns
         log_tree.heading("Date", text="Date")
         log_tree.column("Date", width=150, anchor='center')
+        
+        log_tree.heading("Time In", text="Time In")
+        log_tree.column("Time In", width=150, anchor='center')
 
         # Scrollbars
         y_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=log_tree.yview)
@@ -1776,116 +1823,61 @@ class FaceIDSystem:
         log_tree.pack(side='left', fill='both', expand=True)
         y_scroll.pack(side='right', fill='y')
 
-        # Load attendance dates for this member
+        # Load ALL attendance dates (no Sunday filter)
         try:
             self.db.cursor.execute("""
-                SELECT date 
+                SELECT date, time_in 
                 FROM attendance 
-                WHERE face_id = %s AND DAYOFWEEK(date) = 7  -- Only Saturdays
-                ORDER BY date DESC
+                WHERE face_id = %s
+                ORDER BY date DESC, time_in DESC
             """, (member_id,))
             
             records = self.db.cursor.fetchall()
-            for (date,) in records:
-                log_tree.insert("", tk.END, values=(date,))
+            for date, time_in in records:
+                log_tree.insert("", tk.END, values=(date, time_in))
                 
         except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to load logs: {str(e)}")
+            messagebox.showerror("Error", f"Failed to load history: {str(e)}")
 
         # Close button
-        close_btn = tk.Button(
+        tk.Button(
             log_window,
             text="Close",
             command=log_window.destroy,
             bg='#4CAF50',
             fg='white',
             width=15
-        )
-        close_btn.pack(pady=10)
+        ).pack(pady=10)
 
     def _load_attendance_records(self):
-        """Load members with their attendance status based on Saturday attendance and deceased status"""
-        # Clear existing data
-        for item in self.records_tree.get_children():
-            self.records_tree.delete(item)
-        
         try:
-            # First check if created_at column exists
             self.db.cursor.execute("""
-                SELECT COUNT(*) FROM information_schema.columns 
-                WHERE table_name = 'members' AND column_name = 'created_at'
+                SELECT DISTINCT m.face_id, 
+                    CONCAT(m.first_name, ' ', m.last_name) as name,
+                    m.is_deceased,
+                    MAX(a.date) as last_attended
+                FROM members m
+                LEFT JOIN attendance a ON m.face_id = a.face_id
+                GROUP BY m.face_id
+                ORDER BY m.last_name, m.first_name
             """)
-            has_created_at = self.db.cursor.fetchone()[0] > 0
-            
-            # Get all members (with registration date if available)
-            if has_created_at:
-                self.db.cursor.execute("""
-                    SELECT face_id, CONCAT(first_name, ' ', last_name) as name, 
-                        is_deceased, DATE(created_at) as reg_date
-                    FROM members
-                    ORDER BY last_name, first_name
-                """)
-            else:
-                self.db.cursor.execute("""
-                    SELECT face_id, CONCAT(first_name, ' ', last_name) as name, 
-                        is_deceased, NULL as reg_date
-                    FROM members
-                    ORDER BY last_name, first_name
-                """)
             members = self.db.cursor.fetchall()
             
-            # Get all Saturdays in the attendance records
-            self.db.cursor.execute("""
-                SELECT DISTINCT date FROM attendance 
-                WHERE DAYOFWEEK(date) = 7  -- 7 = Saturday in MySQL
-                ORDER BY date DESC
-            """)
-            saturdays = [row[0] for row in self.db.cursor.fetchall()]
-            
-            # Process each member
-            for member_id, name, is_deceased, reg_date in members:
-                # Check deceased status first
+            for face_id, name, is_deceased, last_attended in members:
                 if is_deceased:
                     status = "Deceased"
-                    self.records_tree.insert("", tk.END, values=(name, status), tags=(member_id,))
-                    continue
-                
-                # Check if registration was on Saturday (if we have the date)
-                reg_is_saturday = False
-                if reg_date and datetime.strptime(str(reg_date), '%Y-%m-%d').weekday() == 5:
-                    reg_is_saturday = True
-                
-                # Get attendance Saturdays
-                self.db.cursor.execute("""
-                    SELECT date FROM attendance 
-                    WHERE face_id = %s AND DAYOFWEEK(date) = 7
-                    ORDER BY date DESC
-                """, (member_id,))
-                member_saturdays = [row[0] for row in self.db.cursor.fetchall()]
-                
-                # Include registration date if it was a Saturday
-                if reg_is_saturday:
-                    member_saturdays.append(reg_date)
-                    member_saturdays = list(set(member_saturdays))  # Remove duplicates
-                    member_saturdays.sort(reverse=True)
-                
-                # Determine status
-                if not member_saturdays:
-                    status = "Inactive (No Saturdays)"
+                elif last_attended == datetime.now().date():
+                    status = "Present Today"
+                elif last_attended:
+                    days_ago = (datetime.now().date() - last_attended).days
+                    status = f"Last attended {days_ago} days ago"
                 else:
-                    # Find the most recent 2 Saturdays in system
-                    recent_saturdays = saturdays[:2] if len(saturdays) >= 2 else saturdays
+                    status = "Never attended"
                     
-                    # Check if member attended any of the recent 2 Saturdays
-                    attended_recent = any(sat in member_saturdays for sat in recent_saturdays)
-                    status = "Active" if attended_recent else "Inactive"
-                
-                # Store member_id in the item but don't display it
-                self.records_tree.insert("", tk.END, values=(name, status), tags=(member_id,))
+                self.records_tree.insert("", tk.END, values=(name, status), tags=(face_id,))
                 
         except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to load records: {str(e)}")
-            print(traceback.format_exc())
+            messagebox.showerror("Error", f"Failed to load records: {str(e)}")
 
     def show_about(self):
         self.clear_frame()
