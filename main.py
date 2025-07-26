@@ -1850,14 +1850,18 @@ class FaceIDSystem:
         ).pack(pady=10)
 
     def _load_attendance_records(self):
+        # Clear existing data first
+        for item in self.records_tree.get_children():
+            self.records_tree.delete(item)
+            
         try:
             self.db.cursor.execute("""
                 SELECT DISTINCT m.face_id, 
                     CONCAT(m.first_name, ' ', m.last_name) as name,
                     m.is_deceased,
                     MAX(a.date) as last_attended
-                FROM members m
-                LEFT JOIN attendance a ON m.face_id = a.face_id
+                FROM members AS m
+                LEFT JOIN attendance AS a ON m.face_id = a.face_id
                 GROUP BY m.face_id
                 ORDER BY m.last_name, m.first_name
             """)
