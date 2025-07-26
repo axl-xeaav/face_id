@@ -49,20 +49,20 @@ class Database:
             # Create members table with all required columns
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS members (
-                    face_id INT AUTO_INCREMENT PRIMARY KEY,
-                    first_name VARCHAR(100) NOT NULL,
-                    middle_initial CHAR(3),
-                    last_name VARCHAR(100) NOT NULL,
-                    address VARCHAR(255),
-                    contact_number VARCHAR(11),
-                    bday DATE,
-                    age INT,
-                    sex CHAR(1),
-                    face_image VARCHAR(255), 
-                    is_deceased BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+                face_id INT AUTO_INCREMENT PRIMARY KEY,
+                first_name VARCHAR(100) NOT NULL,
+                middle_initial CHAR(3),
+                last_name VARCHAR(100) NOT NULL,
+                address VARCHAR(255),
+                contact_number VARCHAR(11),
+                bday DATE,
+                age INT,
+                sex CHAR(1),
+                face_image VARCHAR(255), 
+                is_deceased BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
             
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS attendance (
@@ -1856,15 +1856,15 @@ class FaceIDSystem:
             
         try:
             self.db.cursor.execute("""
-                SELECT DISTINCT m.face_id, 
-                    CONCAT(m.first_name, ' ', m.last_name) as name,
-                    m.is_deceased,
-                    MAX(a.date) as last_attended
-                FROM members AS m
-                LEFT JOIN attendance AS a ON m.face_id = a.face_id
-                GROUP BY m.face_id
-                ORDER BY m.last_name, m.first_name
-            """)
+                SELECT DISTINCT members.face_id, 
+                    CONCAT(members.first_name, ' ', members.last_name) as name,
+                    members.is_deceased,
+                    MAX(attendance.date) as last_attended
+                FROM members
+                LEFT JOIN attendance ON members.face_id = attendance.face_id
+                GROUP BY members.face_id
+                ORDER BY members.last_name, members.first_name
+        """)
             members = self.db.cursor.fetchall()
             
             for face_id, name, is_deceased, last_attended in members:
