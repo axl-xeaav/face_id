@@ -42,30 +42,38 @@ class Database:
     def __init__(self):
         self.conn = mysql.connector.connect(**AppConfig.DB_CONFIG)
         self.cursor = self.conn.cursor()
-        self.create_tables()
-    
-    def create_tables(self):
+        self._force_create_tables()  # Replace create_tables with this
+        self._populate_default_admin()
+
+    def _force_create_tables(self):
+        """Forcefully recreates all tables with correct schema"""
         try:
-            # Create members table with all required columns
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS members (
-                face_id INT AUTO_INCREMENT PRIMARY KEY,
-                first_name VARCHAR(100) NOT NULL,
-                middle_initial CHAR(3),
-                last_name VARCHAR(100) NOT NULL,
-                address VARCHAR(255),
-                contact_number VARCHAR(11),
-                bday DATE,
-                age INT,
-                sex CHAR(1),
-                face_image VARCHAR(255), 
-                is_deceased BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            # Drop tables if they exist (WARNING: This will delete all data)
+            self.cursor.execute("DROP TABLE IF EXISTS attendance")
+            self.cursor.execute("DROP TABLE IF EXISTS members")
+            self.cursor.execute("DROP TABLE IF EXISTS admin_users")
             
+            # Recreate members table with all required columns
             self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS attendance (
+                CREATE TABLE members (
+                    face_id INT AUTO_INCREMENT PRIMARY KEY,
+                    first_name VARCHAR(100) NOT NULL,
+                    middle_initial CHAR(3),
+                    last_name VARCHAR(100) NOT NULL,
+                    address VARCHAR(255),
+                    contact_number VARCHAR(11),
+                    bday DATE,
+                    age INT,
+                    sex CHAR(1),
+                    face_image VARCHAR(255), 
+                    is_deceased BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Recreate other tables
+            self.cursor.execute("""
+                CREATE TABLE attendance (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     face_id INT NOT NULL,
                     date DATE NOT NULL,
@@ -75,7 +83,7 @@ class Database:
             """)
             
             self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS admin_users (
+                CREATE TABLE admin_users (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     username VARCHAR(50) NOT NULL DEFAULT 'admin',
                     password_hash VARCHAR(255) NOT NULL,
@@ -84,26 +92,14 @@ class Database:
                 )
             """)
             
-            # Check if admin user exists
-            self.cursor.execute("SELECT COUNT(*) FROM admin_users")
-            if self.cursor.fetchone()[0] == 0:
-                default_password = "mypassword"
-                password_hash = sha256(default_password.encode()).hexdigest()
-                
-                self.cursor.execute("""
-                    INSERT INTO admin_users 
-                    (username, password_hash, security_question_answer)
-                    VALUES (%s, %s, %s)
-                """, ("admin", password_hash, "dog"))
-            
-            # Ensure all columns exist (including any that might be missing)
-            self._ensure_columns_exist()
-            
             self.conn.commit()
+            print("Database tables recreated successfully")
             
         except Exception as e:
             self.conn.rollback()
             messagebox.showerror("Database Error", f"Error creating tables: {str(e)}")
+            raise
+            
 
     def _ensure_columns_exist(self):
         """Ensure all required columns exist in the members table"""
@@ -1113,6 +1109,7 @@ class FaceIDSystem:
         self.root.title("Face Identification System")
         self.root.geometry("1000x700")
         self.db = Database()
+        self.db.debug_database_schema() 
         self.show_login_window()
         
     def show_login_window(self):
@@ -1147,7 +1144,22 @@ class FaceIDSystem:
 
         self.create_nav_buttons()
         self.show_home()
-
+    
+    def debug_database_schema(self):
+        """Temporary method to debug database schema"""
+        try:
+            self.cursor.execute("SHOW TABLES")
+            tables = self.cursor.fetchall()
+            print("Tables in database:", tables)
+            
+            self.cursor.execute("DESCRIBE members")
+            columns = self.cursor.fetchall()
+            print("Members table columns:")
+            for col in columns:
+                print(col)
+                
+        except Exception as e:
+            print("Debug error:", str(e))
 
     def create_nav_buttons(self):
         buttons = [
@@ -1856,15 +1868,16 @@ class FaceIDSystem:
             
         try:
             self.db.cursor.execute("""
-                SELECT DISTINCT members.face_id, 
-                    CONCAT(members.first_name, ' ', members.last_name) as name,
-                    members.is_deceased,
-                    MAX(attendance.date) as last_attended
-                FROM members
-                LEFT JOIN attendance ON members.face_id = attendance.face_id
-                GROUP BY members.face_id
-                ORDER BY members.last_name, members.first_name
-        """)
+                SELECT 
+                    m.face_id, 
+                    CONCAT(m.first_name, ' ', m.last_name) AS name,
+                    m.is_deceased,
+                    MAX(a.date) AS last_attended
+                FROM members m
+                LEFT JOIN attendance a ON m.face_id = a.face_id
+                GROUP BY m.face_id
+                ORDER BY m.last_name, m.first_name
+            """)
             members = self.db.cursor.fetchall()
             
             for face_id, name, is_deceased, last_attended in members:
