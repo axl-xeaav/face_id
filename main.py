@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox
 from tkcalendar import DateEntry
 from PIL import Image, ImageTk
 from datetime import datetime
+import calendar 
+from datetime import datetime  
 import mysql.connector
 import cv2
 import os
@@ -42,20 +44,16 @@ class Database:
     def __init__(self):
         self.conn = mysql.connector.connect(**AppConfig.DB_CONFIG)
         self.cursor = self.conn.cursor()
-        self._force_create_tables()  # Replace create_tables with this
+        self._create_tables_if_not_exist()
         self._populate_default_admin()
-
-    def _force_create_tables(self):
-        """Forcefully recreates all tables with correct schema"""
+        self._ensure_columns_exist()  # For adding any missing columns
+        
+    def _create_tables_if_not_exist(self):
+        """Create tables only if they don't exist"""
         try:
-            # Drop tables if they exist (WARNING: This will delete all data)
-            self.cursor.execute("DROP TABLE IF EXISTS attendance")
-            self.cursor.execute("DROP TABLE IF EXISTS members")
-            self.cursor.execute("DROP TABLE IF EXISTS admin_users")
-            
-            # Recreate members table with all required columns
+            # Create members table if not exists
             self.cursor.execute("""
-                CREATE TABLE members (
+                CREATE TABLE IF NOT EXISTS members (
                     face_id INT AUTO_INCREMENT PRIMARY KEY,
                     first_name VARCHAR(100) NOT NULL,
                     middle_initial CHAR(3),
@@ -71,9 +69,9 @@ class Database:
                 )
             """)
             
-            # Recreate other tables
+            # Create attendance table if not exists
             self.cursor.execute("""
-                CREATE TABLE attendance (
+                CREATE TABLE IF NOT EXISTS attendance (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     face_id INT NOT NULL,
                     date DATE NOT NULL,
@@ -82,8 +80,9 @@ class Database:
                 )
             """)
             
+            # Create admin_users table if not exists
             self.cursor.execute("""
-                CREATE TABLE admin_users (
+                CREATE TABLE IF NOT EXISTS admin_users (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     username VARCHAR(50) NOT NULL DEFAULT 'admin',
                     password_hash VARCHAR(255) NOT NULL,
@@ -93,13 +92,47 @@ class Database:
             """)
             
             self.conn.commit()
-            print("Database tables recreated successfully")
+            print("Database tables verified/created successfully")
             
         except Exception as e:
             self.conn.rollback()
             messagebox.showerror("Database Error", f"Error creating tables: {str(e)}")
             raise
+    
+    def _populate_default_admin(self):
+        """Ensure there's a default admin user in the database"""
+        try:
+            # Check if admin user exists
+            self.cursor.execute("SELECT COUNT(*) FROM admin_users")
+            if self.cursor.fetchone()[0] == 0:
+                default_password = "mypassword"
+                password_hash = sha256(default_password.encode()).hexdigest()
+                
+                self.cursor.execute("""
+                    INSERT INTO admin_users 
+                    (username, password_hash, security_question_answer)
+                    VALUES (%s, %s, %s)
+                """, ("admin", password_hash, "dog"))
+                self.conn.commit()
+                print("Default admin user created")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error creating default admin: {str(e)}")
+            raise
+    
+    def debug_database_schema(self):
+        """Debug method to verify database schema"""
+        try:
+            self.cursor.execute("SHOW TABLES")
+            print("Tables:", self.cursor.fetchall())
             
+            self.cursor.execute("DESCRIBE members")
+            print("Members columns:", self.cursor.fetchall())
+            
+            self.cursor.execute("DESCRIBE admin_users")
+            print("Admin users columns:", self.cursor.fetchall())
+        except Exception as e:
+            print("Debug error:", str(e))
 
     def _ensure_columns_exist(self):
         """Ensure all required columns exist in the members table"""
@@ -160,6 +193,11 @@ class Database:
         except Exception as e:
             messagebox.showerror("Database Error", f"Error: {str(e)}")
             return None
+        
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error creating default admin: {str(e)}")
+            raise
             
 # FACE RECOGNITION
 
@@ -551,18 +589,22 @@ class RegistrationForm:
             background='white',
             foreground='black',
             borderwidth=2,
-            year=2000,
-            month=1,
-            day=1,
+            year=2000,  # Default year
+            month=1,    # Default month (January)
+            day=1,      # Default day
             date_pattern='y-mm-dd',
             font=AppConfig.FONTS['body'],
             selectbackground='#4CAF50',
-            normalbackground='white'
+            normalbackground='white',
+            maxdate=datetime.now().date(),  # Prevent future dates
+            mindate=datetime(1900, 1, 1).date(),  # Prevent dates older than 1900
+            showweeknumbers=False,  # Hide week numbers
+            showothermonthdays=False,  # Hide days from other months (FIXES 33+ issue)
         )
         self.birthday_entry.place(x=250, y=340, width=300)
         self.birthday_entry.bind("<<DateEntrySelected>>", lambda e: self._validate_birthday())
-        
-        # Age display
+
+        # Age display - MOVED BEFORE SEX FIELD
         tk.Label(
             self.frame, 
             text="Age:", 
@@ -576,6 +618,9 @@ class RegistrationForm:
             bg=AppConfig.COLOR_SCHEME['form_bg']
         )
         self.age_label.place(x=250, y=390)
+
+        # Set initial age based on default birthday
+        self._calculate_age()
 
         tk.Label(
             self.frame, 
@@ -606,7 +651,7 @@ class RegistrationForm:
             bg=AppConfig.COLOR_SCHEME['form_bg']
         ).pack(side='left')
         
-        # Submit button - Now properly defined before being placed
+        # Submit button
         submit_btn = tk.Button(
             self.frame,
             text="Scan Face & Register",
@@ -618,6 +663,37 @@ class RegistrationForm:
         submit_btn.place(x=400, y=480)
         submit_btn.bind("<Enter>", lambda e: e.widget.config(bg=AppConfig.COLOR_SCHEME['primary_dark']))
         submit_btn.bind("<Leave>", lambda e: e.widget.config(bg=AppConfig.COLOR_SCHEME['primary']))
+
+
+    def _validate_birthday(self):
+        try:
+            selected_date = datetime.strptime(self.birthday_entry.get(), '%Y-%m-%d')
+            today = datetime.today()
+            
+            # Check if the day is valid for the month
+            _, last_day_of_month = calendar.monthrange(selected_date.year, selected_date.month)
+            if selected_date.day > last_day_of_month:
+                raise ValueError(f"Invalid day for month (max: {last_day_of_month})")
+            
+            # Prevent future dates
+            if selected_date > today:
+                self._show_birthday_error()
+                return False
+            
+            # Calculate age
+            age = today.year - selected_date.year
+            if (today.month, today.day) < (selected_date.month, selected_date.day):
+                age -= 1
+                
+            self.age_label.config(text=str(age))
+            self._clear_birthday_error()
+            return True
+            
+        except ValueError as e:
+            print(f"Invalid date: {e}")
+            self._show_birthday_error()
+            return False
+        
     def _create_label_entry(self, label_text, field_name, y_pos, width):
         """Helper method to create consistent label+entry pairs"""
         tk.Label(
@@ -1913,7 +1989,7 @@ class FaceIDSystem:
                 bg=AppConfig.COLOR_SCHEME['main_bg']
             ).pack(pady=10)
 
-# RUN APPLICATION
+# RUN APPLICATION,
 if __name__ == "__main__":
     root = tk.Tk()
     app = FaceIDSystem(root)
