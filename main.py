@@ -39,15 +39,14 @@ class AppConfig:
     }
 
 # DATABASE HANDLER
-
 class Database:
     def __init__(self):
         self.conn = mysql.connector.connect(**AppConfig.DB_CONFIG)
         self.cursor = self.conn.cursor()
         self._create_tables_if_not_exist()
         self._populate_default_admin()
-        self._ensure_columns_exist()  # For adding any missing columns
-        
+        self._ensure_columns_exist()
+
     def _create_tables_if_not_exist(self):
         """Create tables only if they don't exist"""
         try:
@@ -98,11 +97,23 @@ class Database:
             self.conn.rollback()
             messagebox.showerror("Database Error", f"Error creating tables: {str(e)}")
             raise
-    
+    def debug_database_schema(self):
+        """Debug method to verify database schema"""
+        try:
+            self.cursor.execute("SHOW TABLES")
+            print("Tables:", self.cursor.fetchall())
+            
+            self.cursor.execute("DESCRIBE members")
+            print("Members columns:", self.cursor.fetchall())
+            
+            self.cursor.execute("DESCRIBE admin_users")
+            print("Admin users columns:", self.cursor.fetchall())
+        except Exception as e:
+            print("Debug error:", str(e))
+
     def _populate_default_admin(self):
         """Ensure there's a default admin user in the database"""
         try:
-            # Check if admin user exists
             self.cursor.execute("SELECT COUNT(*) FROM admin_users")
             if self.cursor.fetchone()[0] == 0:
                 default_password = "mypassword"
@@ -120,43 +131,6 @@ class Database:
             print(f"Error creating default admin: {str(e)}")
             raise
     
-    def debug_database_schema(self):
-        """Debug method to verify database schema"""
-        try:
-            self.cursor.execute("SHOW TABLES")
-            print("Tables:", self.cursor.fetchall())
-            
-            self.cursor.execute("DESCRIBE members")
-            print("Members columns:", self.cursor.fetchall())
-            
-            self.cursor.execute("DESCRIBE admin_users")
-            print("Admin users columns:", self.cursor.fetchall())
-        except Exception as e:
-            print("Debug error:", str(e))
-
-    def _ensure_columns_exist(self):
-        """Ensure all required columns exist in the members table"""
-        try:
-            # List of columns to check/add
-            columns = [
-                ('sex', "CHAR(1)"),
-                ('is_deceased', "BOOLEAN DEFAULT FALSE")
-            ]
-            
-            for column_name, column_def in columns:
-                self.cursor.execute(f"""
-                    SELECT COUNT(*) FROM information_schema.columns 
-                    WHERE table_name = 'members' AND column_name = '{column_name}'
-                """)
-                if self.cursor.fetchone()[0] == 0:
-                    self.cursor.execute(f"ALTER TABLE members ADD COLUMN {column_name} {column_def}")
-                    print(f"Added missing column: {column_name}")
-            
-            self.conn.commit()
-        except Exception as e:
-            self.conn.rollback()
-            print(f"Error ensuring columns exist: {str(e)}")
-
     def _ensure_columns_exist(self):
         """Ensure all required columns exist in the database"""
         columns_to_check = [
@@ -188,19 +162,13 @@ class Database:
             """
             self.cursor.execute(query, member_data)
             member_id = self.cursor.lastrowid
-            self.conn.commit()  # No automatic Sunday attendance
+            self.conn.commit()
             return member_id
         except Exception as e:
             messagebox.showerror("Database Error", f"Error: {str(e)}")
             return None
-        
-        except Exception as e:
-            self.conn.rollback()
-            print(f"Error creating default admin: {str(e)}")
-            raise
             
 # FACE RECOGNITION
-
 class FaceRecognizer:
     def __init__(self, db):
         self.db = db
@@ -219,61 +187,37 @@ class FaceRecognizer:
             print(f"Warning: Could not load attendance. Error: {str(e)}")
             self.today_attendance = set()
 
-    def train_recognizer(self):
-        self.recognizer_trained = True
-        print("DeepFace recognizer ready (no training required)")
-
     def recognize_faces(self):
         if not self.recognizer_trained:
             self.train_recognizer()
         
-        # Create a new window for face recognition with member list
         recognition_window = tk.Toplevel()
         recognition_window.title("Face Recognition")
         recognition_window.geometry("1200x700")
         
-        # Main container frame
         main_container = tk.Frame(recognition_window)
         main_container.pack(fill=tk.BOTH, expand=True)
         
-        # Camera frame (takes remaining space)
         camera_frame = tk.Frame(main_container, bg='black')
         camera_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Member list frame (fixed width)
         member_frame = tk.Frame(main_container, width=150, bg='#f0f0f0')
         member_frame.pack(side=tk.RIGHT, fill=tk.Y)
-        member_frame.pack_propagate(False)  # Prevent frame from resizing to content
+        member_frame.pack_propagate(False)
+
+        tk.Label(member_frame, text="Members", font=('Arial', 12, 'bold'), bg='#f0f0f0').pack(pady=5, padx=5)
         
-        # Title for member list
-        tk.Label(
-            member_frame, 
-            text="Members", 
-            font=('Arial', 12, 'bold'),
-            bg='#f0f0f0'
-        ).pack(pady=5, padx=5)
-        
-        # Create treeview with scrollbars for members
         tree_container = tk.Frame(member_frame)
         tree_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Treeview
-        member_tree = ttk.Treeview(
-            tree_container,
-            columns=("Name"),
-            show="headings",
-            height=30,
-            selectmode='browse'
-        )
+        member_tree = ttk.Treeview(tree_container, columns=("Name"), show="headings", height=30, selectmode='browse')
         member_tree.heading("Name", text="Name")
-        member_tree.column("Name", width=120, anchor='w')  # Matches frame width
+        member_tree.column("Name", width=120, anchor='w')
         
-        # Scrollbars
         y_scroll = ttk.Scrollbar(tree_container, orient="vertical", command=member_tree.yview)
         x_scroll = ttk.Scrollbar(tree_container, orient="horizontal", command=member_tree.xview)
         member_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         
-        # Grid layout for tree and scrollbars
         member_tree.grid(row=0, column=0, sticky="nsew")
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
@@ -281,7 +225,6 @@ class FaceRecognizer:
         tree_container.grid_rowconfigure(0, weight=1)
         tree_container.grid_columnconfigure(0, weight=1)
         
-        # Load members into the tree
         try:
             self.db.cursor.execute("SELECT face_id, first_name, last_name FROM members ORDER BY last_name, first_name")
             members = self.db.cursor.fetchall()
@@ -291,16 +234,9 @@ class FaceRecognizer:
         except Exception as e:
             print(f"Error loading members: {str(e)}")
         
-        # Attendance count label
-        attendance_label = tk.Label(
-            member_frame,
-            text=f"Present: {len(self.today_attendance)}",
-            font=('Arial', 10),
-            bg='#f0f0f0'
-        )
+        attendance_label = tk.Label(member_frame, text=f"Present: {len(self.today_attendance)}", font=('Arial', 10), bg='#f0f0f0')
         attendance_label.pack(pady=5)
         
-        # Function to handle member selection
         def on_member_select(event):
             selected = member_tree.selection()
             if not selected:
@@ -321,16 +257,13 @@ class FaceRecognizer:
         
         member_tree.bind("<Double-1>", on_member_select)
         
-        # Camera setup
         cam = cv2.VideoCapture(0)
         cam.set(3, 640)
         cam.set(4, 480)
         
-        # Video label for camera feed (will fill the camera_frame)
         video_label = tk.Label(camera_frame)
         video_label.pack(fill=tk.BOTH, expand=True)
         
-        # Load member data for recognition
         try:
             self.db.cursor.execute("SELECT face_id, first_name, face_image FROM members")
             members = self.db.cursor.fetchall()
@@ -347,7 +280,6 @@ class FaceRecognizer:
             recognition_window.destroy()
             return 0
         
-        # Recognition parameters
         min_face_size = 15000
         required_confirmations = 5
         confirmations = 0
@@ -365,8 +297,7 @@ class FaceRecognizer:
                 return
             
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(
-                gray, scaleFactor=1.2, minNeighbors=6, minSize=(120, 120))
+            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(120, 120))
             
             for (x, y, w, h) in faces:
                 face_area = w * h
@@ -384,13 +315,7 @@ class FaceRecognizer:
                         continue
                     
                     try:
-                        result = DeepFace.verify(
-                            temp_path,
-                            img_path,
-                            model_name="ArcFace",
-                            detector_backend="opencv",
-                            enforce_detection=False
-                        )
+                        result = DeepFace.verify(temp_path, img_path, model_name="ArcFace", detector_backend="opencv", enforce_detection=False)
                         distance = result["distance"]
                         if result["verified"] and distance < best_distance and distance < distance_threshold:
                             best_face_id, best_distance, best_name = face_id, distance, first_name
@@ -412,7 +337,6 @@ class FaceRecognizer:
                             self.record_attendance(best_face_id)
                             self.today_attendance.add(best_face_id)
                             attendance_label.config(text=f"Present: {len(self.today_attendance)}")
-                            # Update the treeview to show this member as attended
                             for child in member_tree.get_children():
                                 if member_tree.item(child, 'tags')[0] == best_face_id:
                                     member_tree.item(child, tags=(best_face_id, 'attended'))
@@ -426,11 +350,9 @@ class FaceRecognizer:
                 
                 cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
             
-            # Convert image for Tkinter and resize to fit the frame
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(img)
             
-            # Get frame dimensions
             frame_width = camera_frame.winfo_width()
             frame_height = camera_frame.winfo_height()
             
@@ -439,24 +361,18 @@ class FaceRecognizer:
             
             img = ImageTk.PhotoImage(image=img)
             
-            # Update the label with the new image
             video_label.img = img
             video_label.config(image=img)
             
-            # Schedule the next update
             recognition_window.after(10, update_frame)
         
-        # Make the camera frame expand when window resizes
         def on_resize(event):
             if event.widget == recognition_window:
-                camera_frame.config(width=event.width - 160)  # Account for member frame width
+                camera_frame.config(width=event.width - 160)
         
         recognition_window.bind("<Configure>", on_resize)
-        
-        # Start the video feed
         update_frame()
         
-        # Handle window closing
         def on_closing():
             cam.release()
             if os.path.exists("temp_face.jpg"):
@@ -464,8 +380,6 @@ class FaceRecognizer:
             recognition_window.destroy()
         
         recognition_window.protocol("WM_DELETE_WINDOW", on_closing)
-        
-        # Wait for the window to close
         recognition_window.wait_window()
         
         return len(self.today_attendance)
@@ -484,6 +398,7 @@ class FaceRecognizer:
         except Exception as e:
             print(f"Error recording attendance: {str(e)}")
             self.db.conn.rollback()
+
             
 # FACE SCANNER FOR REGISTRATION
 
@@ -493,11 +408,19 @@ def face_scanning(name, preview_callback=None):
     cam.set(4, 480)
     face_detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     print(f"\n [INFO] Initializing face capture for {name}. Look at the camera...")
+    
+    # Create dataset directory if it doesn't exist
     if not os.path.exists("dataset"):
         os.makedirs("dataset")
+    
+    # Create member-specific directory
+    member_folder = os.path.join("dataset", name)
+    if not os.path.exists(member_folder):
+        os.makedirs(member_folder)
+    
     # Use timestamp to ensure unique filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    img_path = f"dataset/{name}_{timestamp}.jpg"
+    img_path = os.path.join(member_folder, f"{name}_{timestamp}.jpg")
     best_face = None
     start_time = datetime.now()
     preview_shown = False
@@ -560,11 +483,12 @@ class RegistrationForm:
         
         self.entries = {}
         
-        # Preview frame
+        # Preview frame with placeholder
         self.preview_frame = tk.Frame(self.frame, bg='white', width=200, height=200)
         self.preview_frame.place(x=600, y=100)
         self.preview_label = tk.Label(self.preview_frame)
         self.preview_label.pack(fill='both', expand=True)
+        self._show_placeholder_image()  # Show initial placeholder
         
         # Name fields
         self._create_label_entry("First Name:", 'first_name', 80, width=300)
@@ -831,18 +755,6 @@ class RegistrationForm:
         except ValueError:
             pass
 
-    def show_preview(self, img_array):
-        """Display the captured face preview"""
-        try:
-            img = Image.fromarray(img_array)
-            img.thumbnail((200, 200))
-            photo = ImageTk.PhotoImage(img)
-            self.preview_images = [photo]
-            self.preview_label.config(image=photo)
-            self.preview_label.image = photo
-        except Exception as e:
-            print(f"Preview error: {str(e)}")
-
     def _register_member(self):
         """Handle the member registration process"""
         try:
@@ -908,11 +820,71 @@ class RegistrationForm:
                 highlightthickness=1,
                 background='white'
             )
+
+        # Preview frame with initial placeholder
+        self.preview_frame = tk.Frame(self.frame, bg='white', width=200, height=200)
+        self.preview_frame.place(x=600, y=100)
+        self.preview_label = tk.Label(self.preview_frame)
+        self.preview_label.pack(fill='both', expand=True)
+        
+        # Show initial placeholder
+        self.show_placeholder_image()
+
+    def _show_placeholder_image(self):
+        """Show placeholder image before face capture"""
+        try:
+            # Create blank image with instructions
+            img = Image.new('RGB', (200, 200), color=(240, 240, 240))
+            draw = ImageDraw.Draw(img)
+            try:
+                font = ImageFont.truetype("arial.ttf", 14)
+            except:
+                font = ImageFont.load_default()
+            
+            text = "Face Preview\n(Click Scan Face and Register)"
+            bbox = draw.textbbox((0, 0), text, font=font)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text(
+                ((200 - w)/2, (200 - h)/2), 
+                text, 
+                fill="black", 
+                font=font
+            )
+            
+            photo = ImageTk.PhotoImage(img)
+            self.preview_label.config(image=photo)
+            self.preview_label.image = photo
+        except Exception as e:
+            print(f"Error creating placeholder: {str(e)}")
+
+    def show_preview(self, img_array):
+        """Display the captured face preview"""
+        try:
+            img = Image.fromarray(img_array)
+            img.thumbnail((200, 200))
+            photo = ImageTk.PhotoImage(img)
+            self.preview_images = [photo]
+            self.preview_label.config(image=photo)
+            self.preview_label.image = photo
+        except Exception as e:
+            print(f"Preview error: {str(e)}")
+            self._show_placeholder_image()
+
+    def _reset_form(self):
+        """Reset all form fields"""
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+            entry.config(
+                highlightbackground='white',
+                highlightthickness=1,
+                background='white'
+            )
         self.birthday_entry.set_date(datetime(2000, 1, 1))
         self._clear_birthday_error()
         self.age_label.config(text="")
         self.preview_images = []
-        self.preview_label.config(image='')
+        self._show_placeholder_image()  # Reset to placeholder
+
 # MAIN APPLICATION
 
 class FaceIDSystem:
@@ -1075,35 +1047,20 @@ class FaceIDSystem:
         self.root.title("Face Identification System")
         self.root.geometry("1000x700")
         self.db = Database()
-        
-        # Initialize password manager
         self.password_manager = PasswordManager(self.db)
-        
-        # Start with login window
         self.show_login_window()
         
     def show_login_window(self):
-        # Hide main window until logged in
         self.root.withdraw()
-        
-        # Create login window
-        self.login_window = LoginWindow(
-            self.root, 
-            self.db, 
-            self.on_login_success
-        )
-        
-        # When login window closes, check if we should show main window
+        self.login_window = LoginWindow(self.root, self.db, self.on_login_success)
         self.login_window.wait_window()
         if not self.root.winfo_exists():
-            return  # App was closed
-        
+            return
+    
     def on_login_success(self):
-        # Show main window
         self.root.deiconify()
         self.setup_ui()
         
-        # Add admin config button to main interface
         admin_btn = tk.Button(
             self.root,
             text="Admin Config",
@@ -1185,7 +1142,7 @@ class FaceIDSystem:
         self.root.title("Face Identification System")
         self.root.geometry("1000x700")
         self.db = Database()
-        self.db.debug_database_schema() 
+        #self.db.debug_database_schema() 
         self.show_login_window()
         
     def show_login_window(self):
@@ -1596,46 +1553,35 @@ class FaceIDSystem:
             self.edit_entries['bday'].config(background='#ffdddd', foreground='red')
 
     def _setup_face_preview(self, parent_window, member_data):
-        """Setup face image preview section with proper error handling"""
+        """Setup face image preview with modern text sizing"""
         self.preview_frame = tk.Frame(parent_window, bg='white', width=200, height=200)
         self.preview_frame.pack(pady=10)
         
         self.preview_label = tk.Label(self.preview_frame)
         self.preview_label.pack(fill='both', expand=True)
         
-        # Get image path (index 10 is face_image in our query)
+        # Get image path
         self.current_image_path = member_data[10] if len(member_data) > 10 else None
         
-        # Try multiple locations if image not found
-        possible_paths = [
-            self.current_image_path,
-            os.path.join("dataset", os.path.basename(self.current_image_path)) if self.current_image_path else None,
-            os.path.join(os.path.dirname(__file__), "dataset", os.path.basename(self.current_image_path)) if self.current_image_path else None
-        ]
-        
+        # Try to load image
         img_found = False
-        for path in possible_paths:
-            if path and os.path.exists(path):
-                try:
-                    img = Image.open(path)
-                    img.thumbnail((200, 200))
-                    photo = ImageTk.PhotoImage(img)
-                    self.preview_label.config(image=photo)
-                    self.preview_label.image = photo  # Keep reference
-                    self.current_image_path = path  # Update to found path
-                    img_found = True
-                    break
-                except Exception as e:
-                    print(f"Error loading image {path}: {str(e)}")
-                    continue
+        if self.current_image_path and os.path.exists(self.current_image_path):
+            try:
+                img = Image.open(self.current_image_path)
+                img.thumbnail((200, 200))
+                photo = ImageTk.PhotoImage(img)
+                self.preview_label.config(image=photo)
+                self.preview_label.image = photo
+                img_found = True
+            except Exception as e:
+                print(f"Error loading image: {str(e)}")
         
+        # Fallback to initials
         if not img_found:
-            # Create a placeholder with member initials
             first_name = member_data[1] if len(member_data) > 1 else ""
             last_name = member_data[3] if len(member_data) > 3 else ""
             initials = f"{first_name[0] if first_name else ''}{last_name[0] if last_name else ''}"
             
-            # Create blank image with initials
             img = Image.new('RGB', (200, 200), color=(200, 200, 200))
             draw = ImageDraw.Draw(img)
             try:
@@ -1643,16 +1589,26 @@ class FaceIDSystem:
             except:
                 font = ImageFont.load_default()
             
-            w, h = draw.textsize(initials, font=font)
-            draw.text(((200-w)/2, (200-h)/2), initials, fill="black", font=font)
+            # Modern text sizing (Pillow ≥ 9.2.0)
+            bbox = draw.textbbox((0, 0), initials, font=font)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            
+            draw.text(
+                ((200 - w)/2, (200 - h)/2), 
+                initials, 
+                fill="black", 
+                font=font
+            )
             
             photo = ImageTk.PhotoImage(img)
             self.preview_label.config(image=photo)
             self.preview_label.image = photo
-            tk.Label(self.preview_frame, 
-                    text="Image not found\nShowing initials", 
-                    font=('Arial', 8),
-                    bg='white').pack()
+            tk.Label(
+                self.preview_frame, 
+                text="Image not found\nShowing initials", 
+                font=('Arial', 8),
+                bg='white'
+            ).pack()
 
     def _setup_action_buttons(self, parent_window):
         """Setup action buttons with proper commands and styling"""
@@ -1717,6 +1673,11 @@ class FaceIDSystem:
                 self.preview_label.image = photo
             except Exception as e:
                 print(f"Preview error: {str(e)}")
+
+        # Create member folder if it doesn't exist
+        member_folder = os.path.join("dataset", name)
+        if not os.path.exists(member_folder):
+            os.makedirs(member_folder)
 
         new_img_path = face_scanning(name, preview_callback=preview_callback)
         
@@ -1865,7 +1826,7 @@ class FaceIDSystem:
         refresh_btn.pack(pady=10)
         
     def _show_member_attendance(self, event):
-        """Show ALL attendance dates for selected member (not just Sundays)"""
+        """Show attendance dates for selected member with date search"""
         selected = self.records_tree.selection()
         if not selected:
             return
@@ -1876,20 +1837,14 @@ class FaceIDSystem:
         
         # Create new window
         log_window = tk.Toplevel(self.root)
-        log_window.title(f"Full Attendance History - {member_name}")
+        log_window.title(f"Attendance History - {member_name}")
         log_window.geometry("600x400")
         
-        # Title
-        tk.Label(
-            log_window,
-            text=f"All Attendance Records for {member_name}",
-            font=('Arial', 14, 'bold')
-        ).pack(pady=10)
-        
-        # Treeview with scrollbars
+        # Create a frame for the treeview and scrollbars
         tree_frame = tk.Frame(log_window)
         tree_frame.pack(fill='both', expand=True, padx=10, pady=10)
-
+        
+        # Create the treeview
         log_tree = ttk.Treeview(
             tree_frame,
             columns=("Date", "Time In"),
@@ -1900,44 +1855,86 @@ class FaceIDSystem:
         # Configure columns
         log_tree.heading("Date", text="Date")
         log_tree.column("Date", width=150, anchor='center')
-        
         log_tree.heading("Time In", text="Time In")
         log_tree.column("Time In", width=150, anchor='center')
 
-        # Scrollbars
+        # Add scrollbars
         y_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=log_tree.yview)
-        log_tree.configure(yscrollcommand=y_scroll.set)
-
-        log_tree.pack(side='left', fill='both', expand=True)
-        y_scroll.pack(side='right', fill='y')
-
-        # Load ALL attendance dates (no Sunday filter)
-        try:
-            self.db.cursor.execute("""
-                SELECT date, time_in 
-                FROM attendance 
-                WHERE face_id = %s
-                ORDER BY date DESC, time_in DESC
-            """, (member_id,))
-            
-            records = self.db.cursor.fetchall()
-            for date, time_in in records:
-                log_tree.insert("", tk.END, values=(date, time_in))
+        x_scroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=log_tree.xview)
+        log_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        
+        # Grid layout for treeview and scrollbars
+        log_tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        
+        # Configure grid weights
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        
+        # Search frame at the top
+        search_frame = tk.Frame(log_window)
+        search_frame.pack(fill='x', padx=10, pady=5)
+        
+        tk.Label(search_frame, text="Search Date (YYYY-MM-DD):").pack(side='left')
+        date_search_var = tk.StringVar()
+        search_entry = tk.Entry(
+            search_frame,
+            textvariable=date_search_var,
+            font=('Arial', 12),
+            width=15
+        )
+        search_entry.pack(side='left', padx=5)
+        
+        # Load initial data
+        def load_data(filter_text=None):
+            """Helper function to load data with optional filter"""
+            # Clear existing data
+            for item in log_tree.get_children():
+                log_tree.delete(item)
                 
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load history: {str(e)}")
-
+            try:
+                query = "SELECT date, time_in FROM attendance WHERE face_id = %s"
+                params = [member_id]
+                
+                if filter_text:
+                    query += " AND date LIKE %s"
+                    params.append(f"%{filter_text}%")
+                    
+                query += " ORDER BY date DESC, time_in DESC"
+                
+                self.db.cursor.execute(query, tuple(params))
+                records = self.db.cursor.fetchall()
+                
+                for date, time_in in records:
+                    log_tree.insert("", tk.END, values=(date, time_in))
+                    
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load attendance: {str(e)}")
+        
+        # Bind search functionality
+        def on_search_change(*args):
+            filter_text = date_search_var.get()
+            load_data(filter_text)
+        
+        date_search_var.trace_add("write", on_search_change)
+        
+        # Load initial data
+        load_data()
+        
         # Close button
-        tk.Button(
+        close_btn = tk.Button(
             log_window,
             text="Close",
             command=log_window.destroy,
             bg='#4CAF50',
             fg='white',
             width=15
-        ).pack(pady=10)
+        )
+        close_btn.pack(pady=10)
 
     def _load_attendance_records(self):
+        """Load all attendance records"""
         # Clear existing data first
         for item in self.records_tree.get_children():
             self.records_tree.delete(item)
@@ -1989,7 +1986,7 @@ class FaceIDSystem:
                 bg=AppConfig.COLOR_SCHEME['main_bg']
             ).pack(pady=10)
 
-# RUN APPLICATION,
+# RUN APPLICATION
 if __name__ == "__main__":
     root = tk.Tk()
     app = FaceIDSystem(root)
