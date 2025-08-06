@@ -229,7 +229,8 @@ class FaceRecognizer:
             self.db.cursor.execute("SELECT face_id, first_name, last_name FROM members ORDER BY last_name, first_name")
             members = self.db.cursor.fetchall()
             for face_id, first_name, last_name in members:
-                display_name = f"{first_name[0]}. {last_name}" if first_name else last_name
+                # New format: "FirstName LastInitial."
+                display_name = f"{first_name} {last_name[0]}." if (first_name and last_name) else ""
                 member_tree.insert("", tk.END, values=(display_name,), tags=(face_id,))
         except Exception as e:
             print(f"Error loading members: {str(e)}")
@@ -331,24 +332,17 @@ class FaceRecognizer:
                         last_name = best_name
                     
                     if confirmations >= required_confirmations:
-                        display_text = f"{last_name} ({(1-best_distance)*100:.1f}%)"
+                        # Get full name details for proper display
+                        self.db.cursor.execute("SELECT first_name, last_name FROM members WHERE face_id = %s", (best_face_id,))
+                        member_details = self.db.cursor.fetchone()
+                        if member_details:
+                            first_name, last_name = member_details
+                            display_text = f"{first_name} {last_name[0]}."  # Format: "FirstName L."
+                            display_text += f" ({(1-best_distance)*100:.1f}%)"  # Add confidence percentage
+                        else:
+                            display_text = f"Unknown ({(1-best_distance)*100:.1f}%)"
+                        
                         cv2.putText(img, display_text, (x+5, y-5), self.font, 1, (0, 255, 0), 2)
-                        if best_face_id not in self.today_attendance:
-                            self.record_attendance(best_face_id)
-                            self.today_attendance.add(best_face_id)
-                            attendance_label.config(text=f"Present: {len(self.today_attendance)}")
-                            for child in member_tree.get_children():
-                                if member_tree.item(child, 'tags')[0] == best_face_id:
-                                    member_tree.item(child, tags=(best_face_id, 'attended'))
-                                    member_tree.tag_configure('attended', foreground='green')
-                                    break
-                    else:
-                        cv2.putText(img, "Verifying...", (x+5, y-5), self.font, 1, (255, 255, 0), 2)
-                else:
-                    cv2.putText(img, "Guest", (x+5, y-5), self.font, 1, (0, 0, 255), 2)
-                    confirmations = 0
-                
-                cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
             
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(img)
@@ -1367,35 +1361,53 @@ class FaceIDSystem:
         refresh_btn.pack(pady=(0,10))
 
     def _load_members_data(self):
-        """Load members data into treeview"""
-        # Clear existing data
+        """Load ALL members (active + deceased) with proper data display"""
         for item in self.members_tree.get_children():
             self.members_tree.delete(item)
         
         try:
-            # Get search term if any
-            search_term = self.search_var.get().lower() if hasattr(self, 'search_var') else ""
-            
+            # Fetch ALL members, including deceased (sorted alphabetically)
             self.db.cursor.execute("""
-                SELECT face_id, first_name, middle_initial, last_name, sex, address, 
-                    contact_number, DATE_FORMAT(bday, '%Y-%m-%d'), age, is_deceased
+                SELECT 
+                    face_id, first_name, middle_initial, last_name, 
+                    sex, address, contact_number, 
+                    DATE_FORMAT(bday, '%Y-%m-%d'), age, is_deceased
                 FROM members
-                ORDER BY last_name, first_name
+                ORDER BY 
+                    is_deceased,  # Deceased members last
+                    last_name, 
+                    first_name
             """)
             members_data = self.db.cursor.fetchall()
             
             for member in members_data:
-                # Check if member matches search term
-                member_text = " ".join(str(x) for x in member).lower()
-                if not search_term or search_term in member_text:
-                    status = "Deceased" if member[9] else "Active"
-                    self.members_tree.insert("", tk.END, 
-                                        values=(member[0], member[1], member[2], member[3],
-                                                member[4], member[5], member[6], member[7],
-                                                member[8], status, "Edit"))
-                    
+                # Unpack all fields (including is_deceased)
+                (face_id, first_name, middle_initial, last_name, 
+                sex, address, contact_number, bday, age, is_deceased) = member
+                
+                status = "Deceased" if is_deceased else "Active"
+                display_name = f"{first_name} {last_name[0]}."  # Format: "Clarence S."
+                
+                # Insert into treeview (ALL fields preserved)
+                self.members_tree.insert("", tk.END, 
+                    values=(
+                        face_id, 
+                        first_name, 
+                        middle_initial, 
+                        last_name, 
+                        sex, 
+                        address, 
+                        contact_number, 
+                        bday, 
+                        age, 
+                        status, 
+                        "Edit"  # Action button
+                    ),
+                    tags=(face_id,)
+                )
+                
         except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to load members: {str(e)}")
+            messagebox.showerror("Error", f"Failed to load members: {str(e)}")
 
     def _filter_members(self, event=None):
         """Filter members list based on search term"""
@@ -1693,43 +1705,50 @@ class FaceIDSystem:
             messagebox.showinfo("Success", "Face image updated!")
 
     def _save_member_changes(self):
-        """Validate and save member changes"""
-        # Validate fields
+        """Save changes WITHOUT erasing data for deceased members"""
         if not self._validate_fields():
             return
         
-        # Save to database
         try:
+            # Get ALL current form values (including deceased toggle)
             updated_data = (
-                self.edit_entries['first_name'].get(),
-                self.edit_entries['middle_initial'].get(),
-                self.edit_entries['last_name'].get(),
-                self.edit_entries['address'].get(),
-                self.edit_entries['contact_number'].get(),
-                self.edit_entries['bday'].get(),
-                self.edit_entries['age'].get(),
-                self.sex_var.get(),  # NEW: Sex value
-                self.is_deceased_var.get(),
-                self.current_image_path,
-                self.current_edit_member[0]  # face_id
+                self.edit_entries['first_name'].get(),  # Preserved
+                self.edit_entries['middle_initial'].get(),  # Preserved
+                self.edit_entries['last_name'].get(),  # Preserved
+                self.edit_entries['address'].get(),  # Preserved
+                self.edit_entries['contact_number'].get(),  # Preserved
+                self.edit_entries['bday'].get(),  # Preserved
+                self.edit_entries['age'].get(),  # Preserved
+                self.sex_var.get(),  # Preserved
+                self.is_deceased_var.get(),  # Only this changes
+                self.current_image_path,  # Preserved
+                self.current_edit_member[0]  # face_id (for WHERE)
             )
             
+            # Update ALL fields (no data loss)
             self.db.cursor.execute("""
                 UPDATE members 
-                SET first_name=%s, middle_initial=%s, last_name=%s, 
-                    address=%s, contact_number=%s, bday=%s, 
-                    age=%s, sex=%s, is_deceased=%s, face_image=%s
-                WHERE face_id=%s
+                SET 
+                    first_name = %s,
+                    middle_initial = %s,
+                    last_name = %s,
+                    address = %s,
+                    contact_number = %s,
+                    bday = %s,
+                    age = %s,
+                    sex = %s,
+                    is_deceased = %s,
+                    face_image = %s
+                WHERE face_id = %s
             """, updated_data)
             
             self.db.conn.commit()
-            messagebox.showinfo("Success", "Member updated successfully!")
+            messagebox.showinfo("Success", "Changes saved! Data preserved.")
             self.edit_window.destroy()
-            self.show_database()  # Refresh view
+            self._load_members_data()  # Refresh list
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to update member: {str(e)}")
-            print(traceback.format_exc())
+            messagebox.showerror("Error", f"Save failed: {str(e)}")
 
     def _validate_fields(self):
         """Validate all form fields"""
@@ -1934,8 +1953,7 @@ class FaceIDSystem:
         close_btn.pack(pady=10)
 
     def _load_attendance_records(self):
-        """Load all attendance records"""
-        # Clear existing data first
+        """Load attendance records with alphabetical sorting"""
         for item in self.records_tree.get_children():
             self.records_tree.delete(item)
             
@@ -1949,7 +1967,10 @@ class FaceIDSystem:
                 FROM members m
                 LEFT JOIN attendance a ON m.face_id = a.face_id
                 GROUP BY m.face_id
-                ORDER BY m.last_name, m.first_name
+                ORDER BY 
+                    m.is_deceased,  # Deceased last
+                    m.last_name, 
+                    m.first_name
             """)
             members = self.db.cursor.fetchall()
             
@@ -1964,8 +1985,13 @@ class FaceIDSystem:
                 else:
                     status = "Never attended"
                     
-                self.records_tree.insert("", tk.END, values=(name, status), tags=(face_id,))
+                # Format name as "FirstName L."
+                first_name, last_name = name.split(' ', 1) if ' ' in name else (name, '')
+                display_name = f"{first_name} {last_name[0]}." if (first_name and last_name) else name
                 
+                self.records_tree.insert("", tk.END, 
+                                    values=(display_name, status), 
+                                    tags=(face_id,))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load records: {str(e)}")
 
