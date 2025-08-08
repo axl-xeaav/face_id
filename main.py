@@ -8,13 +8,16 @@ from datetime import datetime
 import mysql.connector
 import cv2
 import os
+import numpy as np
 from deepface import DeepFace
 import logging
 import traceback
 from hashlib import sha256
 from tkinter import simpledialog
 from PIL import Image, ImageTk, ImageDraw, ImageFont
-
+import threading
+import time
+import queue
 logging.getLogger('tensorflow').disabled = True  # Disable TensorFlow logging
 
 # APP CONFIGURATION
@@ -135,7 +138,8 @@ class Database:
         """Ensure all required columns exist in the database"""
         columns_to_check = [
             ('sex', "CHAR(1)"),
-            ('is_deceased', "BOOLEAN DEFAULT FALSE")
+            ('is_deceased', "BOOLEAN DEFAULT FALSE"),
+            ('face_vector', "BLOB")  # Add this line for face vectors
         ]
         
         for column_name, column_def in columns_to_check:
@@ -162,6 +166,13 @@ class Database:
             """
             self.cursor.execute(query, member_data)
             member_id = self.cursor.lastrowid
+            
+            # Generate and store face vector
+            img_path = member_data[-1]  # Last element is the image path
+            vectorizer = FaceVectorizer(self)
+            if not vectorizer.update_member_vector(member_id, img_path):
+                print(f"Warning: Could not generate vector for member {member_id}")
+                
             self.conn.commit()
             return member_id
         except Exception as e:
@@ -169,14 +180,109 @@ class Database:
             return None
             
 # FACE RECOGNITION
-class FaceRecognizer:
+class FaceVectorizer:
     def __init__(self, db):
         self.db = db
+        
+    def image_to_vector(self, img_path):
+        """Convert an image to a face vector"""
+        try:
+            if not os.path.exists(img_path):
+                raise FileNotFoundError(f"Image not found at {img_path}")
+                
+            img = cv2.imread(img_path)
+            if img is None:
+                raise ValueError(f"Invalid image file at {img_path}")
+                
+            # Try multiple models if needed
+            models = ["VGG-Face", "Facenet", "OpenFace"]
+            vector = None
+            
+            for model in models:
+                try:
+                    result = DeepFace.represent(
+                        img_path,
+                        model_name=model,
+                        enforce_detection=False
+                    )
+                    vector = np.array(result[0]["embedding"])
+                    break
+                except Exception as e:
+                    print(f"Model {model} failed, trying next...")
+                    continue
+                    
+            if vector is None:
+                raise ValueError("All face recognition models failed")
+                
+            return vector
+        except Exception as e:
+            print(f"Error converting image to vector: {str(e)}")
+            raise
+            
+    def update_member_vector(self, face_id, img_path):
+        """Update the vector for a specific member"""
+        try:
+            vector = self.image_to_vector(img_path)
+            self.db.cursor.execute(
+                "UPDATE members SET face_vector = %s WHERE face_id = %s",
+                (vector.tobytes(), face_id)
+            )
+            self.db.conn.commit()
+            return True
+        except Exception as e:
+            self.db.conn.rollback()
+            print(f"Error updating vector for member {face_id}: {str(e)}")
+            return False
+        
+class FaceRecognizer:
+    def __init__(self, db, root):
+        self.db = db
+        self.root = root
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.recognizer_trained = True
         self.today_attendance = set()
         self.load_current_date_attendance()
+        self.vectorizer = FaceVectorizer(db)
+        self.last_recognition_time = 0
+        self.current_face_id = None
+        self.current_face_name = None
+        self.current_confidence = 0
+        self.recognition_active = False
+        self.stop_flag = False
+        self.status_queue = queue.Queue()
+        self.fps = 0
+        self.cam = None
+        self.min_face_size = 15000  # Minimum face area in pixels (adjust as needed)
+        self.required_confirmations = 3  # Number of consecutive matches needed
+        self.confirmations = 0  # Current confirmation count
+        self.last_face_id = None  # Last recognized face ID
+        self.last_name = None  # Last recognized name
+        self.distance_threshold = 0.5  # Maximum distance for a match
+        self.member_data = []  # Initialize empty member data list
+
+
+    def initialize_camera(self):
+        """Initialize camera with optimized settings"""
+        if self.cam is None:
+            self.cam = cv2.VideoCapture(0)
+            if not self.cam.isOpened():
+                messagebox.showerror("Error", "Could not open camera")
+                return False
+            
+            # Set optimized camera properties
+            self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Reduced resolution
+            self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.cam.set(cv2.CAP_PROP_FPS, 15)  # Lower FPS for reduced processing
+            self.cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer size
+            return True
+        return True
+
+    def release_camera(self):
+        """Properly release camera resources"""
+        if self.cam is not None:
+            self.cam.release()
+            self.cam = None
         
     def load_current_date_attendance(self):
         today = datetime.now().strftime('%Y-%m-%d')
@@ -188,23 +294,52 @@ class FaceRecognizer:
             self.today_attendance = set()
 
     def recognize_faces(self):
-        if not self.recognizer_trained:
-            self.train_recognizer()
-        
-        recognition_window = tk.Toplevel()
+        """Initialize camera and start face recognition with optimized settings"""
+        # Initialize camera with optimized settings
+        if not self.initialize_camera():
+            messagebox.showerror("Error", "Failed to initialize camera")
+            return 0
+
+        # Load member data only when needed
+        try:
+            self.db.cursor.execute("SELECT face_id, first_name, face_image, face_vector FROM members")
+            self.member_data = self.db.cursor.fetchall()
+            if not self.member_data:
+                messagebox.showwarning("Warning", "No registered members found.")
+                self.release_camera()
+                return 0
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to load members: {str(e)}")
+            self.release_camera()
+            return 0
+
+        # Create recognition window
+        recognition_window = tk.Toplevel(self.root)
         recognition_window.title("Face Recognition")
         recognition_window.geometry("1200x700")
         
+        # Main container
         main_container = tk.Frame(recognition_window)
         main_container.pack(fill=tk.BOTH, expand=True)
         
+        # Camera frame
         camera_frame = tk.Frame(main_container, bg='black')
         camera_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
+        # Member frame
         member_frame = tk.Frame(main_container, width=150, bg='#f0f0f0')
         member_frame.pack(side=tk.RIGHT, fill=tk.Y)
         member_frame.pack_propagate(False)
 
+        # Status label
+        self.recognizing_label = tk.Label(member_frame, text="Ready", font=('Arial', 10), bg='#f0f0f0', fg='green')
+        self.recognizing_label.pack(pady=5)
+        
+        # FPS counter
+        self.fps_label = tk.Label(member_frame, text="FPS: 0", font=('Arial', 10), bg='#f0f0f0')
+        self.fps_label.pack(pady=5)
+
+        # Members list
         tk.Label(member_frame, text="Members", font=('Arial', 12, 'bold'), bg='#f0f0f0').pack(pady=5, padx=5)
         
         tree_container = tk.Frame(member_frame)
@@ -225,19 +360,21 @@ class FaceRecognizer:
         tree_container.grid_rowconfigure(0, weight=1)
         tree_container.grid_columnconfigure(0, weight=1)
         
+        # Populate members list
         try:
             self.db.cursor.execute("SELECT face_id, first_name, last_name FROM members ORDER BY last_name, first_name")
             members = self.db.cursor.fetchall()
             for face_id, first_name, last_name in members:
-                # New format: "FirstName LastInitial."
                 display_name = f"{first_name} {last_name[0]}." if (first_name and last_name) else ""
                 member_tree.insert("", tk.END, values=(display_name,), tags=(face_id,))
         except Exception as e:
             print(f"Error loading members: {str(e)}")
         
+        # Attendance counter
         attendance_label = tk.Label(member_frame, text=f"Present: {len(self.today_attendance)}", font=('Arial', 10), bg='#f0f0f0')
         attendance_label.pack(pady=5)
         
+        # Member selection handler
         def on_member_select(event):
             selected = member_tree.selection()
             if not selected:
@@ -258,125 +395,202 @@ class FaceRecognizer:
         
         member_tree.bind("<Double-1>", on_member_select)
         
-        cam = cv2.VideoCapture(0)
-        cam.set(3, 640)
-        cam.set(4, 480)
-        
+        # Video label for camera feed
         video_label = tk.Label(camera_frame)
         video_label.pack(fill=tk.BOTH, expand=True)
         
-        try:
-            self.db.cursor.execute("SELECT face_id, first_name, face_image FROM members")
-            members = self.db.cursor.fetchall()
-            if not members:
-                print("Warning: No members found in database.")
-                messagebox.showwarning("Warning", "No registered members found.")
-                cam.release()
-                recognition_window.destroy()
-                return 0
-        except Exception as e:
-            print(f"Error fetching members: {str(e)}")
-            messagebox.showerror("Database Error", f"Failed to load members: {str(e)}")
-            cam.release()
-            recognition_window.destroy()
-            return 0
+        # Start video processing thread
+        self.recognition_active = True
+        self.stop_flag = False
+        self.video_thread = threading.Thread(target=self._video_loop, args=(video_label,))
+        self.video_thread.daemon = True
+        self.video_thread.start()
         
-        min_face_size = 15000
-        required_confirmations = 5
-        confirmations = 0
-        last_face_id = None
-        last_name = None
-        distance_threshold = 0.5
+        # Start queue checker
+        self.check_queue(video_label)
         
-        def update_frame():
-            nonlocal confirmations, last_face_id, last_name
-            
-            ret, img = cam.read()
-            if not ret:
-                print("Error: Could not read frame from camera.")
-                recognition_window.after(10, update_frame)
-                return
-            
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(120, 120))
-            
-            for (x, y, w, h) in faces:
-                face_area = w * h
-                if face_area < min_face_size:
-                    continue
-                    
-                face_img = img[y:y+h, x:x+w]
-                temp_path = "temp_face.jpg"
-                cv2.imwrite(temp_path, face_img)
-                best_face_id, best_distance, best_name = None, float('inf'), None
-                
-                for face_id, first_name, img_path in members:
-                    if not os.path.exists(img_path):
-                        print(f"Warning: Image not found at {img_path}")
-                        continue
-                    
-                    try:
-                        result = DeepFace.verify(temp_path, img_path, model_name="ArcFace", detector_backend="opencv", enforce_detection=False)
-                        distance = result["distance"]
-                        if result["verified"] and distance < best_distance and distance < distance_threshold:
-                            best_face_id, best_distance, best_name = face_id, distance, first_name
-                    except Exception as e:
-                        print(f"Error verifying face for {img_path}: {str(e)}")
-                
-                if best_face_id is not None:
-                    if best_face_id == last_face_id:
-                        confirmations += 1
-                    else:
-                        confirmations = 1
-                        last_face_id = best_face_id
-                        last_name = best_name
-                    
-                    if confirmations >= required_confirmations:
-                        # Get full name details for proper display
-                        self.db.cursor.execute("SELECT first_name, last_name FROM members WHERE face_id = %s", (best_face_id,))
-                        member_details = self.db.cursor.fetchone()
-                        if member_details:
-                            first_name, last_name = member_details
-                            display_text = f"{first_name} {last_name[0]}."  # Format: "FirstName L."
-                            display_text += f" ({(1-best_distance)*100:.1f}%)"  # Add confidence percentage
-                        else:
-                            display_text = f"Unknown ({(1-best_distance)*100:.1f}%)"
-                        
-                        cv2.putText(img, display_text, (x+5, y-5), self.font, 1, (0, 255, 0), 2)
-            
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(img)
-            
-            frame_width = camera_frame.winfo_width()
-            frame_height = camera_frame.winfo_height()
-            
-            if frame_width > 0 and frame_height > 0:
-                img.thumbnail((frame_width, frame_height), Image.LANCZOS)
-            
-            img = ImageTk.PhotoImage(image=img)
-            
-            video_label.img = img
-            video_label.config(image=img)
-            
-            recognition_window.after(10, update_frame)
-        
-        def on_resize(event):
-            if event.widget == recognition_window:
-                camera_frame.config(width=event.width - 160)
-        
-        recognition_window.bind("<Configure>", on_resize)
-        update_frame()
-        
+        # Window close handler
         def on_closing():
-            cam.release()
-            if os.path.exists("temp_face.jpg"):
-                os.remove("temp_face.jpg")
+            self.stop_flag = True
+            self.recognition_active = False
+            if self.video_thread.is_alive():
+                self.video_thread.join(timeout=1)
+            self.release_camera()
             recognition_window.destroy()
         
         recognition_window.protocol("WM_DELETE_WINDOW", on_closing)
-        recognition_window.wait_window()
         
         return len(self.today_attendance)
+
+    def check_queue(self, video_label):
+        """Check for messages from video thread"""
+        try:
+            while True:
+                msg_type, content = self.status_queue.get_nowait()
+                if msg_type == "update":
+                    video_label.config(image=content)
+                    video_label.image = content
+                elif msg_type == "status":
+                    self.recognizing_label.config(text=content)
+                elif msg_type == "fps":
+                    self.fps_label.config(text=f"FPS: {content:.1f}")
+        except queue.Empty:
+            pass
+        self.root.after(100, lambda: self.check_queue(video_label))
+
+    def _video_loop(self, video_label):
+        """Optimized video processing loop with reduced memory usage"""
+        last_update_time = time.time()
+        update_interval = 0.066  # Target ~15 FPS
+        
+        try:
+            while not self.stop_flag and self.recognition_active:
+                start_time = time.time()
+                
+                # 1. Capture frame
+                ret, img = self.cam.read()
+                if not ret:
+                    continue
+
+                # 2. Quick face detection with reduced processing
+                small_img = cv2.resize(img, (0,0), fx=0.5, fy=0.5)
+                gray = cv2.cvtColor(small_img, cv2.COLOR_BGR2GRAY)
+                
+                faces = self.face_cascade.detectMultiScale(
+                    gray,
+                    scaleFactor=1.1,
+                    minNeighbors=3,
+                    minSize=(80, 80)
+                )
+
+                # 3. Process faces with rate limiting
+                current_time = time.time()
+                should_recognize = (current_time - self.last_recognition_time) > 2.0
+                
+                for (x, y, w, h) in faces:
+                    x, y, w, h = x*2, y*2, w*2, h*2  # Scale coordinates
+                    face_area = w * h
+                    cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
+                    
+                    if should_recognize and face_area > self.min_face_size:
+                        self.status_queue.put(("status", "Recognizing..."))
+                        face_img = img[y:y+h, x:x+w]
+                        temp_path = "temp_face.jpg"
+                        cv2.imwrite(temp_path, face_img)
+                        self.root.after(0, lambda p=temp_path: self._process_face_recognition(p, x, y))
+                        self.last_recognition_time = current_time
+
+                # 4. Controlled GUI updates
+                if current_time - last_update_time >= update_interval:
+                    display_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    display_img = Image.fromarray(display_img)
+                    display_img.thumbnail((640, 480), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(image=display_img)
+                    self.status_queue.put(("update", photo))
+                    last_update_time = current_time
+                
+                # 5. Update FPS counter
+                self.fps = 1/(time.time()-start_time)
+                self.status_queue.put(("fps", self.fps))
+
+                # 6. Add small delay to prevent 100% CPU usage
+                time.sleep(0.01)
+
+        except Exception as e:
+            print(f"Video loop error: {str(e)}")
+            self.stop_flag = True
+            self.status_queue.put(("status", f"Error: {str(e)}"))
+        finally:
+            self.release_camera()
+    
+    def _process_face_recognition(self, temp_path, x, y):
+        """Process face recognition in main thread"""
+        try:
+            if not self.root.winfo_exists() or self.stop_flag:
+                return
+            
+            self.status_queue.put(("status", "Processing..."))
+            
+            # Get vector for the detected face
+            temp_vector = self.vectorizer.image_to_vector(temp_path)
+            if temp_vector is None:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)  # Clean up temp file
+                return
+            
+            best_face_id = None
+            best_distance = float('inf')
+            best_name = None
+            
+            # Compare with all members in database
+            for face_id, first_name, img_path, face_vector_bytes in self.member_data:
+                if not face_vector_bytes:
+                    continue
+                    
+                try:
+                    # Convert bytes back to numpy array
+                    db_vector = np.frombuffer(face_vector_bytes, dtype=np.float64)
+                    
+                    # Calculate cosine similarity (1 - cosine distance)
+                    similarity = np.dot(temp_vector, db_vector) / (np.linalg.norm(temp_vector) * np.linalg.norm(db_vector))
+                    distance = 1 - similarity  # Convert to distance metric
+                    
+                    if distance < best_distance and distance < self.distance_threshold:
+                        best_face_id, best_distance, best_name = face_id, distance, first_name
+                        
+                except Exception as e:
+                    print(f"Error comparing with member {face_id}: {str(e)}")
+                    continue
+            
+            # Clean up temp file after processing
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+            if best_face_id is not None:
+                self._update_recognition_results(best_face_id, best_distance, best_name, x, y)
+                self.status_queue.put(("status", "Recognized!"))
+            else:
+                self.status_queue.put(("status", "Ready"))
+                
+        except Exception as e:
+            print(f"Error in face recognition: {str(e)}")
+            traceback.print_exc()
+            self.stop_flag = True
+            
+    
+    def _update_recognition_results(self, face_id, distance, first_name, x, y):
+        """Update recognition results and handle attendance"""
+        if face_id == self.last_face_id:
+            self.confirmations += 1
+        else:
+            self.confirmations = 1
+            self.last_face_id = face_id
+            self.last_name = first_name
+        
+        if self.confirmations >= self.required_confirmations:
+            try:
+                self.db.cursor.execute("SELECT first_name, last_name FROM members WHERE face_id = %s", (face_id,))
+                member_details = self.db.cursor.fetchone()
+                
+                if member_details:
+                    first_name, last_name = member_details
+                    self.current_face_name = f"{first_name} {last_name[0]}."
+                    self.current_confidence = (1 - distance) * 100
+                    self.current_face_id = face_id
+                    
+                    # Auto-record attendance if not already recorded
+                    if face_id not in self.today_attendance:
+                        self.record_attendance(face_id)
+                        self.today_attendance.add(face_id)
+                        
+            except Exception as e:
+                print(f"Database error during recognition: {str(e)}")
+    
+    def _update_display(self, video_label, img):
+        """Update the display in the main thread"""
+        if not self.stop_flag:
+            video_label.img = img
+            video_label.config(image=img)
         
     def record_attendance(self, face_id):
         try:
@@ -1263,7 +1477,8 @@ class FaceIDSystem:
 
     def start_face_recognition(self):
         if not hasattr(self, 'face_recognizer'):
-            self.face_recognizer = FaceRecognizer(self.db)
+            # Pass the root window to the recognizer
+            self.face_recognizer = FaceRecognizer(self.db, self.root)  # Add self.root as second parameter
         
         new_count = self.face_recognizer.recognize_faces()
         if hasattr(self, 'attendance_label'):
